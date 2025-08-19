@@ -24,7 +24,7 @@ async def run_automation(goal: str, config: Optional[Dict[str, Any]] = None):
     # Set up MCP client with headless mode and better browser management
     server_params = StdioServerParameters(
         command="/Users/arhan/.nvm/versions/node/v22.18.0/bin/npx",
-        args=["-y", "@playwright/mcp@latest", "--headless", "--isolated"],
+        args=["-y", "@playwright/mcp@latest", "--isolated"],
     )
     
     print("🔌 Connecting to Playwright MCP server...")

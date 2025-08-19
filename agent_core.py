@@ -88,6 +88,7 @@ class WebAgent:
                 interactives = self.state.page_state["interactives"]
                 page_summary += f"Available interactions: {', '.join(interactives[:10])}\n"
         
+
         # Create system message with context
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
             tools=self.tool_manager.get_tool_descriptions(),
@@ -138,6 +139,24 @@ class WebAgent:
                     continue
                 self.state.navigation_history.append(url)
                 self.state.current_url = url
+                # Immediately capture a snapshot of the initial page so the planner
+                # has page data to search for call-to-action buttons via prompt.
+                try:
+                    snap_res = await self.tool_manager.execute_tool("browser_snapshot", {})
+                    page_elements = extract_interactive_elements(snap_res)
+                    self.state.page_state = page_elements
+                    summary = f"Page Snapshot Summary:\n"
+                    summary += f"Title: {page_elements.get('title', 'Unknown')}\n"
+                    summary += f"URL: {self.state.current_url or 'Unknown'}\n"
+                    summary += f"Headings: {', '.join(page_elements.get('headings', [])[:5])}\n"
+                    summary += f"Buttons: {', '.join(page_elements.get('buttons', [])[:8])}\n"
+                    summary += f"Inputs: {', '.join(page_elements.get('inputs', [])[:8])}\n"
+                    summary += f"Links: {', '.join(page_elements.get('links', [])[:5])}\n"
+                    results.append(ToolMessage(content=summary, tool_call_id=f"{tool_id}-snapshot"))
+                except Exception as e:
+                    err = f"Error taking initial snapshot: {e}"
+                    self.state.errors.append(err)
+                    results.append(ToolMessage(content=err, tool_call_id=f"{tool_id}-snapshot"))
             
             # Track clicked elements to avoid repetition
             if tool_name == "browser_click" and "element" in tool_args:
@@ -151,7 +170,6 @@ class WebAgent:
                 if tool_name == "browser_snapshot":
                     page_elements = extract_interactive_elements(result)
                     self.state.page_state = page_elements
-                    
                     # Create a more concise result for the agent
                     summary = f"Page Snapshot Summary:\n"
                     summary += f"Title: {page_elements.get('title', 'Unknown')}\n"
@@ -160,7 +178,6 @@ class WebAgent:
                     summary += f"Buttons: {', '.join(page_elements.get('buttons', [])[:8])}\n"
                     summary += f"Inputs: {', '.join(page_elements.get('inputs', [])[:8])}\n"
                     summary += f"Links: {', '.join(page_elements.get('links', [])[:5])}\n"
-                    
                     results.append(ToolMessage(content=summary, tool_call_id=tool_id))
                 else:
                     results.append(ToolMessage(
