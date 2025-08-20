@@ -28,95 +28,146 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
         "tabs": [],
         "refs": {},
         "interactives": [],
+        "all_clickables": []  # New field for all clickable elements
     }
+    
     ref_pattern = re.compile(r"\[ref=(e\d+)\]")
     quoted_pattern = re.compile(r'"(.+?)"')
+    
     for line in lines:
         line_lower = line.lower()
+        
+        # Extract title
         if result["title"] is None and "page title:" in line_lower:
             result["title"] = line.split(":", 1)[-1].strip()
             continue
-        if " heading " in f" {line_lower} ":
-            for q in quoted_pattern.findall(line):
-                if q and q not in result["headings"]:
-                    result["headings"].append(q)
-                    result["interactives"].append(f"heading: {q}")
-        if " button " in f" {line_lower} ":
-            for q in quoted_pattern.findall(line):
-                if q and q not in result["buttons"]:
-                    result["buttons"].append(q)
-                    result["interactives"].append(f"button: {q}")
-        if " tab " in f" {line_lower} ":
-            for q in quoted_pattern.findall(line):
-                if q and q not in result["tabs"]:
-                    result["tabs"].append(q)
-                    result["interactives"].append(f"tab: {q}")
-        if _is_interactive_line(line_lower):
-            for q in quoted_pattern.findall(line):
-                if q and q not in result["inputs"]:
-                    # treat all interactive types (other than obvious buttons/links) as inputs bucket
-                    if q not in result["inputs"] and q not in result["buttons"]:
-                        result["inputs"].append(q)
-                        result["interactives"].append(f"input: {q}")
-        if " link " in f" {line_lower} ":
-            for q in quoted_pattern.findall(line):
-                if q and q not in result["links"]:
-                    result["links"].append(q)
-                    result["interactives"].append(f"link: {q}")
-        refs = ref_pattern.findall(line)
-        if refs:
+        
+        # Extract all interactive elements with better pattern matching
+        interactive_keywords = [
+            "button", "link", "tab", "textbox", "input", "combobox", 
+            "textarea", "checkbox", "radio", "select", "clickable", "interactive"
+        ]
+        
+        # Check if this line contains any interactive element
+        is_interactive = any(f" {kw} " in f" {line_lower} " for kw in interactive_keywords)
+        
+        if is_interactive:
+            # Extract all quoted text (potential labels)
             labels = quoted_pattern.findall(line)
+            
+            # Extract reference
+            refs = ref_pattern.findall(line)
+            
+            # Classify the element type
+            element_type = "unknown"
+            if "button" in line_lower:
+                element_type = "button"
+            elif "tab" in line_lower:
+                element_type = "tab"
+            elif any(kw in line_lower for kw in ["textbox", "input", "combobox", "textarea"]):
+                element_type = "input"
+            elif "link" in line_lower:
+                element_type = "link"
+            elif any(kw in line_lower for kw in ["checkbox", "radio", "select"]):
+                element_type = "input"  # Group these as inputs
+                
+            # Add to appropriate category
             for label in labels:
                 if label:
-                    result["refs"].setdefault(label, []).extend(refs)
+                    # Add to specific category
+                    if element_type == "button" and label not in result["buttons"]:
+                        result["buttons"].append(label)
+                    elif element_type == "tab" and label not in result["tabs"]:
+                        result["tabs"].append(label)
+                    elif element_type == "input" and label not in result["inputs"]:
+                        result["inputs"].append(label)
+                    elif element_type == "link" and label not in result["links"]:
+                        result["links"].append(label)
+                    
+                    # Add to general interactives
+                    interactive_desc = f"{element_type}: {label}"
+                    if interactive_desc not in result["interactives"]:
+                        result["interactives"].append(interactive_desc)
+                    
+                    # Add to all clickables
+                    if element_type in ["button", "tab", "link"] and label not in result["all_clickables"]:
+                        result["all_clickables"].append(label)
+                    
+                    # Store ref associations
+                    if refs:
+                        for ref in refs:
+                            if label not in result["refs"]:
+                                result["refs"][label] = []
+                            if ref not in result["refs"][label]:
+                                result["refs"][label].append(ref)
+    
     return result
 
 
-def find_element_ref(snapshot_text: str, element_text: str) -> Optional[str]:
+def find_element_ref(snapshot_text: str, element_text: str, element_type: str = None) -> Optional[str]:
     """
-    Improved heuristic:
-      - Collect all lines containing the label.
-      - Score each candidate:
-          interactive line => higher score
-          direct line with ref => better than parent fallback
-          later occurrence slightly preferred (more specific often appears after generic text)
-      - Return best-scoring ref.
+    Enhanced element finding with better pattern matching and prioritization.
     """
-    ref_pattern = re.compile(r"\[ref=(e\d+)\]")
     lines = snapshot_text.splitlines()
-    element_escaped = re.escape(element_text)
-    label_regex = re.compile(rf'"{element_escaped}"')
+    element_lower = element_text.lower()
+    
     candidates = []
-
+    
     for idx, line in enumerate(lines):
-        if label_regex.search(line):
-            line_lower = line.lower()
-            refs_here = ref_pattern.findall(line)
-            parent_refs = ref_pattern.findall(lines[idx - 1]) if idx > 0 else []
-            ref = refs_here[0] if refs_here else (parent_refs[0] if parent_refs else None)
-            if ref:
-                score = 0
-                if _is_interactive_line(line_lower):
-                    score += 5
-                if refs_here:
-                    score += 2  # direct ref on same line
-                score += idx * 0.001  # slight preference for later (more specific) lines
-                candidates.append((score, ref))
-
+        line_lower = line.lower()
+        
+        # Skip non-interactive lines
+        if not any(kw in line_lower for kw in ["button", "link", "tab", "textbox", "input", "clickable"]):
+            continue
+            
+        # Check for various match types with different scores
+        score = 0
+        
+        # Exact match (highest priority)
+        if f'"{element_text}"' in line:
+            score = 100
+        # Contains match
+        elif element_lower in line_lower:
+            score = 80
+        # Fuzzy match (word boundary)
+        elif re.search(rf'\b{re.escape(element_lower)}\b', line_lower):
+            score = 70
+        # Partial match
+        elif any(word in line_lower for word in element_lower.split()):
+            score = 50
+        else:
+            continue
+            
+        # Bonus for type matching
+        if element_type and element_type in line_lower:
+            score += 20
+            
+        # Extract reference
+        ref_match = re.search(r"\[ref=(e\d+)\]", line)
+        if ref_match:
+            ref = ref_match.group(1)
+            candidates.append((score, ref, line))
+            
+            # Also check previous line for ref
+            if idx > 0:
+                prev_ref_match = re.search(r"\[ref=(e\d+)\]", lines[idx-1])
+                if prev_ref_match:
+                    prev_ref = prev_ref_match.group(1)
+                    candidates.append((score - 5, prev_ref, lines[idx-1]))
+    
     if not candidates:
-        # fallback partial match if no exact quoted match
-        partial_regex = re.compile(rf'"[^"]*{element_escaped}[^"]*"')
-        for idx, line in enumerate(lines):
-            if partial_regex.search(line):
-                refs_here = ref_pattern.findall(line)
-                parent_refs = ref_pattern.findall(lines[idx - 1]) if idx > 0 else []
-                ref = refs_here[0] if refs_here else (parent_refs[0] if parent_refs else None)
-                if ref:
-                    return ref
+        # Try alternative element names for "Apply Here"
+        if "apply here" in element_lower:
+            alternative_texts = ["apply", "submit", "continue", "next", "start application"]
+            for alt_text in alternative_texts:
+                if alt_text != element_text:
+                    alt_ref = find_element_ref(snapshot_text, alt_text, element_type)
+                    if alt_ref:
+                        return alt_ref
         return None
-
-    # Return best scoring ref
-    candidates.sort(key=lambda t: t[0], reverse=True)
+        
+    # Return the highest scoring candidate
+    candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
 
 

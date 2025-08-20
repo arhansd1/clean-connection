@@ -154,7 +154,8 @@ class ToolManager:
             param_parts = []
             for param_name, param_def in props.items():
                 param_type = param_def.get("type", "any") if isinstance(param_def, dict) else "any"
-                req_mark = "*" if param_name in required else ""
+                # Make only 'ref' required for browser_click
+                req_mark = "*" if (param_name in required and not (name == "browser_click" and param_name == "element")) else ""
                 param_parts.append(f"{param_name}:{param_type}{req_mark}")
                 
             param_str = ", ".join(param_parts) if param_parts else "No parameters"
@@ -166,6 +167,27 @@ class ToolManager:
 
     async def execute_tool(self, name: str, args: Dict[str, Any]) -> str:
         """Execute a tool with the given arguments."""
+
+        # Special handling for browser_click to make it easier
+        if name == "browser_click":
+            # If we only have text but no ref, try to find the ref first
+            if ("element" in args or "selector" in args) and "ref" not in args:
+                # Get the element text
+                element_text = args.get("element") or args.get("selector", "")
+                
+                # First try to get a snapshot if we don't have one
+                snapshot_result = await self.session.call_tool("browser_snapshot", {})
+                snapshot_text = str(getattr(snapshot_result, "content", None) or "")
+                
+                # Try to find the reference
+                from utils import find_element_ref
+                ref = find_element_ref(snapshot_text, element_text)
+                if ref:
+                    # Found a reference, use it instead
+                    args = {"ref": ref}
+                    print(f"Found reference {ref} for element '{element_text}'")
+        
+
         # Adapt common parameter synonyms
         if name in self.tool_schemas:
             schema = self.tool_schemas[name]

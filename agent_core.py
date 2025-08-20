@@ -10,7 +10,7 @@ from langgraph.graph import START
 from langgraph.graph import MessagesState
 
 from tool_manager import ToolManager
-from utils import extract_interactive_elements, truncate_text
+from utils import extract_interactive_elements, truncate_text , find_element_ref , analyze_goal , extract_form_fields , _is_interactive_line
 from prompts import SYSTEM_PROMPT_TEMPLATE, REFLECTION_PROMPT
 
 import base64
@@ -69,66 +69,130 @@ class WebAgent:
         
         return workflow.compile()
     
-    def planner_node(self, state: MessagesState):
-        """Plan next action based on current state."""
+    def _prepare_invoke_messages(self, messages, keep_last: int = 5):
+        """Prepare a structured sequence of messages for LLM.
         
-        messages = state["messages"]
-        
-        # Check if we've reached step limit
-        if self.state.step_count >= self.state.max_steps:
-            return {"messages": messages + [AIMessage(content="Reached maximum step count. Stopping execution.")]}
-        
-        # Generate task-specific context additions
+        Structure:
+        1. System message (context + tools)
+        2. User's original goal
+        3. Most recent actions/results
+        """
+        prepared = []
+
+        # 1. Build system message with current context
         page_summary = ""
         if self.state.page_state:
             page_summary = f"\nCurrent page: {self.state.current_url or 'Unknown'}\n"
             if "title" in self.state.page_state:
                 page_summary += f"Title: {self.state.page_state.get('title')}\n"
-            if "interactives" in self.state.page_state:
-                interactives = self.state.page_state["interactives"]
-                page_summary += f"Available interactions: {', '.join(interactives[:10])}\n"
-        
+            if "buttons" in self.state.page_state:
+                buttons = self.state.page_state["buttons"]
+                page_summary += f"Buttons: {', '.join(buttons[:5])}\n"
+            if "element_refs" in self.state.page_state:
+                refs = self.state.page_state["element_refs"]
+                ref_items = []
+                for label, rlist in list(refs.items())[:5]:
+                    ref_items.append(f"'{label}': {','.join(rlist)}")
+                page_summary += f"Element refs: {', '.join(ref_items)}\n"
 
-        # Create system message with context
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-            tools=self.tool_manager.get_tool_descriptions(),
             page_context=page_summary,
             step_count=f"{self.state.step_count}/{self.state.max_steps}"
         )
+        prepared.append(SystemMessage(content=system_prompt))
+
+        # 2. Include original goal (first human message)
+        first_human = next((m for m in messages if isinstance(m, HumanMessage)), None)
+        if first_human:
+            prepared.append(first_human)
+
+        # 3. Add last few non-system messages (actions/results)
+        recent = []
+        for msg in reversed(messages):
+            if not isinstance(msg, SystemMessage):
+                if len(recent) < keep_last:
+                    recent.append(msg)
+        recent.reverse()
+        prepared.extend(recent)
+
+        return prepared
+    
+    def planner_node(self, state: MessagesState):
+        """Plan next action based on current state."""
+        messages = state["messages"]
         
-        system_msg = SystemMessage(content=system_prompt)
+        # Check if we've reached step limit
+        if self.state.step_count >= self.state.max_steps:
+            return {"messages": messages + [AIMessage(content="Reached maximum step limit. Stopping execution.")]}
         
-        
-        
-        if not messages or not isinstance(messages[0], SystemMessage):
-            messages = [system_msg] + messages
-            
-        else:
-            messages[0] = system_msg
-            
         try:
-            response = self.llm.invoke(messages)
+            # Prepare a structured sequence of messages
+            invoke_messages = self._prepare_invoke_messages(messages, keep_last=5)
+
+            # Call LLM with structured messages
+            response = self.llm.invoke(invoke_messages)
+
+            # If LLM returned tool calls but no content, add descriptive content
+            if hasattr(response, "tool_calls") and response.tool_calls and not getattr(response, "content", None):
+                tools_desc = "; ".join([f"{tc.get('name')}({tc.get('args')})" for tc in response.tool_calls])
+                response.content = f"Planning next steps: {tools_desc}"
+
             self.state.step_count += 1
+            # Add both the rebuilt system prompt and response to history
             return {"messages": messages + [response]}
+
         except Exception as e:
             error_msg = f"Error in planning: {str(e)}"
             self.state.errors.append(error_msg)
-            return {"messages": messages + [AIMessage(content=error_msg)]}
-        
+            return {"messages": messages + [AIMessage(content=error_msg)]}      
     
     async def executor_node(self, state: MessagesState):
         """Execute tools called by the planner."""
         messages = state["messages"]
         last_message = messages[-1]
         results = []
-        print(last_message)
+        
+        # Track consecutive failures of the same type
+        recent_errors = [msg for msg in messages[-3:] if isinstance(msg, ToolMessage) and "Error executing" in msg.content]
+        similar_errors = len([msg for msg in recent_errors if "browser_click" in msg.content])
+        
         for tool_call in getattr(last_message, "tool_calls", []) or []:
             tool_name = tool_call.get("name")
             tool_args = tool_call.get("args", {})
             tool_id = tool_call.get("id") or tool_name
             
-            # Handle navigation history for loop detection
-            print(tool_name)
+            # Print tool call information
+            print(f"\n Executing tool: {tool_name}")
+            print(f"   - Arguments: {tool_args}")
+            print(f"   - Call ID: {tool_id}")
+            
+            # Handle click operations
+            if tool_name == "browser_click":
+                # Always try to find the element in the latest snapshot
+                if self.state.page_state and "snapshot_text" in self.state.page_state:
+                    # Get element text, trying different possible keys
+                    element_text = tool_args.get("element") or tool_args.get("selector", "") or tool_args.get("ref", "")
+                    
+                    # If we only have a ref, try to find its text from page state
+                    if element_text.startswith("e") and "refs" in self.state.page_state:
+                        for label, refs in self.state.page_state.get("refs", {}).items():
+                            if element_text in refs:
+                                element_text = label
+                                break
+                    
+                    # Try to find ref
+                    new_ref = find_element_ref(
+                        self.state.page_state["snapshot_text"], 
+                        element_text,
+                        tool_args.get("element_type", "button")
+                    )
+                    
+                    if new_ref:
+                        # Use both element and ref for better reliability
+                        tool_args["ref"] = new_ref
+                        tool_args["element"] = element_text
+                
+            # Handle navigation
             if tool_name == "browser_navigate" and "url" in tool_args:
                 url = tool_args["url"]
                 if url in self.state.navigation_history[-3:]:
@@ -139,49 +203,50 @@ class WebAgent:
                     continue
                 self.state.navigation_history.append(url)
                 self.state.current_url = url
-                # Immediately capture a snapshot of the initial page so the planner
-                # has page data to search for call-to-action buttons via prompt.
-                try:
-                    snap_res = await self.tool_manager.execute_tool("browser_snapshot", {})
-                    page_elements = extract_interactive_elements(snap_res)
-                    self.state.page_state = page_elements
-                    summary = f"Page Snapshot Summary:\n"
-                    summary += f"Title: {page_elements.get('title', 'Unknown')}\n"
-                    summary += f"URL: {self.state.current_url or 'Unknown'}\n"
-                    summary += f"Headings: {', '.join(page_elements.get('headings', [])[:5])}\n"
-                    summary += f"Buttons: {', '.join(page_elements.get('buttons', [])[:8])}\n"
-                    summary += f"Inputs: {', '.join(page_elements.get('inputs', [])[:8])}\n"
-                    summary += f"Links: {', '.join(page_elements.get('links', [])[:5])}\n"
-                    results.append(ToolMessage(content=summary, tool_call_id=f"{tool_id}-snapshot"))
-                except Exception as e:
-                    err = f"Error taking initial snapshot: {e}"
-                    self.state.errors.append(err)
-                    results.append(ToolMessage(content=err, tool_call_id=f"{tool_id}-snapshot"))
-            
-            # Track clicked elements to avoid repetition
-            if tool_name == "browser_click" and "element" in tool_args:
-                element = tool_args["element"]
-                self.state.visited_elements.add(element)
             
             try:
-                result = await self.tool_manager.execute_tool(tool_name, tool_args)
+                # Print before execution
+                print(f"   - Executing {tool_name} with args: {tool_args}")
                 
-                # Special handling for snapshot to extract page state
+                try:
+                    result = await self.tool_manager.execute_tool(tool_name, tool_args)
+                    print(f"   - {tool_name} executed successfully")
+                except Exception as e:
+                    print(f"   - Error executing {tool_name}: {str(e)}")
+                    raise
+                
+                # Special handling for snapshot
                 if tool_name == "browser_snapshot":
+                    # Store the raw snapshot text for element finding
+                    self.state.page_state["snapshot_text"] = result
                     page_elements = extract_interactive_elements(result)
-                    self.state.page_state = page_elements
-                    # Create a more concise result for the agent
+                    self.state.page_state.update(page_elements)
+                    
+                    # Enhanced summary
                     summary = f"Page Snapshot Summary:\n"
                     summary += f"Title: {page_elements.get('title', 'Unknown')}\n"
                     summary += f"URL: {self.state.current_url or 'Unknown'}\n"
-                    summary += f"Headings: {', '.join(page_elements.get('headings', [])[:5])}\n"
-                    summary += f"Buttons: {', '.join(page_elements.get('buttons', [])[:8])}\n"
-                    summary += f"Inputs: {', '.join(page_elements.get('inputs', [])[:8])}\n"
-                    summary += f"Links: {', '.join(page_elements.get('links', [])[:5])}\n"
+                    
+                    # Show elements with their references
+                    for element_type in ["buttons", "tabs", "inputs", "links"]:
+                        if element_type in page_elements and page_elements[element_type]:
+                            elements_with_refs = []
+                            for element in page_elements[element_type][:8]:
+                                refs = page_elements.get("refs", {}).get(element, [])
+                                ref_str = f" (ref: {refs[0]})" if refs else ""
+                                elements_with_refs.append(f'"{element}"{ref_str}')
+                            summary += f"{element_type.capitalize()}: {', '.join(elements_with_refs)}\n"
+                    
+                    print(f"   - Snapshot summary generated")
+                    print(f"   - Title: {page_elements.get('title', 'Unknown')}")
+                    print(f"   - Buttons: {len(page_elements.get('buttons', []))}")
+                    print(f"   - Inputs: {len(page_elements.get('inputs', []))}")
                     results.append(ToolMessage(content=summary, tool_call_id=tool_id))
                 else:
+                    result_str = truncate_text(str(result), 2000)
+                    print(f"   - Tool result: {result_str[:200]}..." if len(result_str) > 200 else f"   - Tool result: {result_str}")
                     results.append(ToolMessage(
-                        content=truncate_text(result, 1500), 
+                        content=result_str,
                         tool_call_id=tool_id
                     ))
             except Exception as e:
@@ -221,14 +286,14 @@ class WebAgent:
         
         # Self-reflection message
         reflection = f"""
-REFLECTION:
-Step {self.state.step_count}/{self.state.max_steps}
-Recent results: {truncate_text(tool_contents, 300)}
-Visited elements: {len(self.state.visited_elements)}
-Navigation history: {len(self.state.navigation_history)} pages
-Errors: {len(self.state.errors)}
-Task complete: {completion_detected}
-"""
+                    REFLECTION:
+                    Step {self.state.step_count}/{self.state.max_steps}
+                    Recent results: {truncate_text(tool_contents, 300)}
+                    Visited elements: {len(self.state.visited_elements)}
+                    Navigation history: {len(self.state.navigation_history)} pages
+                    Errors: {len(self.state.errors)}
+                    Task complete: {completion_detected}
+                    """
         
         if completion_detected:
             reflection += f"\nTask appears complete: {completion_reason}"
@@ -236,7 +301,8 @@ Task complete: {completion_detected}
             return {"messages": messages + [AIMessage(content=reflection)]}
             
         return {"messages": messages}
-    
+        print(state['messages'])
+
     def route_from_planner(self, state: MessagesState):
         """Determine next state after planning."""
         messages = state["messages"]
