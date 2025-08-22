@@ -787,39 +787,9 @@ async def run_verbose():
                 "tool_calls_executed": tm.calls[-len(new_exec):] if new_exec else []
             })
 
-            # Post executor always goes to reflector per workflow
-            log("ROUTE", "Transition executor -> reflector", "STEP")
-            route = "reflector"
-
-        # 3. Reflector
-        if route == "reflector":
-            before_msgs_refl = state["messages"][:]
-            refl_out = agent.reflector_node(state)
-            state["messages"] = refl_out["messages"]
-            new_refl = diff_new_messages(before_msgs_refl, state["messages"])
-            log("REFLECTOR", f"Reflection added {len(new_refl)} message(s)", "OK")
-            if new_refl:
-                for nm in new_refl:
-                    log("REFLECT_MSG", f"{truncate(nm.content, 200)}", "DIM")
-            if agent.state.task_complete:
-                log("COMPLETE", "Reflector marked task as complete", "HL")
-
-            all_intermediate.append({
-                "iteration": iteration,
-                "phase": "reflector",
-                "agent_state": {
-                    "step_count": agent.state.step_count,
-                    "navigation_history": agent.state.navigation_history[:],
-                    "visited_elements": list(agent.state.visited_elements),
-                    "task_complete": agent.state.task_complete,
-                    "errors": agent.state.errors[:]
-                },
-                "messages": describe_messages(state["messages"]),
-            })
-
-            if agent.state.task_complete:
-                log("EXIT", "Stopping loop due to completion flag", "WARN")
-                break
+            # Post executor now routes to planner per workflow (reflector removed)
+            log("ROUTE", "Transition executor -> planner", "STEP")
+            route = "planner"
 
         # Safety: stop if steps exceed threshold to avoid infinite test loops.
         if iteration > 12:

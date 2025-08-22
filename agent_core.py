@@ -5,13 +5,13 @@ from dataclasses import dataclass, field
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_core.tools import BaseTool
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph
 from langgraph.graph import START
 from langgraph.graph import MessagesState
 
 from tool_manager import ToolManager
 from utils import extract_interactive_elements, truncate_text , find_element_ref , analyze_goal , extract_form_fields , _is_interactive_line
-from prompts import SYSTEM_PROMPT_TEMPLATE, REFLECTION_PROMPT
+from prompts import SYSTEM_PROMPT_TEMPLATE, FILLER_PROMPT_TEMPLATE
 
 import base64
 import os
@@ -51,21 +51,21 @@ class WebAgent:
         # Define nodes
         workflow.add_node("planner", self.planner_node)
         workflow.add_node("executor", self.executor_node)
-        workflow.add_node("reflector", self.reflector_node)
-        
+        workflow.add_node("filler", self.filler_node)
+
         # Define edges
         workflow.add_edge(START, "planner")
         workflow.add_conditional_edges(
             "planner",
             self.route_from_planner,
-            {
-                "executor": "executor", 
-                "reflector": "reflector",
-                "exit": END
-            }
+            {"executor": "executor"}
         )
-        workflow.add_edge("executor", "reflector")
-        workflow.add_edge("reflector", "planner")
+        workflow.add_conditional_edges(
+            "executor",
+            self.route_after_execution,
+            {"filler": "filler", "planner": "planner"}
+        )
+        workflow.add_edge("filler", "executor")
         
         return workflow.compile()
     
@@ -205,8 +205,8 @@ class WebAgent:
                 self.state.current_url = url
             
             try:
-                # Print before execution
-                print(f"   - Executing {tool_name} with args: {tool_args}")
+                # Print raw metadata before execution
+                print(f"\n[TOOL_METADATA] name={tool_name} args={tool_args} call_id={tool_id}")
                 
                 try:
                     result = await self.tool_manager.execute_tool(tool_name, tool_args)
@@ -256,69 +256,44 @@ class WebAgent:
         
         return {"messages": messages + results}
     
-    def reflector_node(self, state: MessagesState):
-        """Reflect on execution results and determine if task is complete."""
-        messages = state["messages"]
-        
-        # Look at recent tool results
-        recent_tools = [m for m in messages[-5:] if isinstance(m, ToolMessage)]
-        tool_contents = "\n".join([m.content for m in recent_tools])
-        
-        # Look for success signals in recent outputs
-        success_signals = [
-            ("screenshot", "saved", "Task involves taking screenshot"),
-            ("form", "submitted", "Task involves form submission"),
-            ("success", "confirmation", "Task received confirmation"),
-            ("download", "completed", "Task involves downloading"),
-            ("extracted", "data", "Task involves data extraction")
-        ]
-        
-        # Check for completion signals
-        completion_detected = False
-        completion_reason = ""
-        
-        for signal, confirmation, reason in success_signals:
-            if (signal.lower() in tool_contents.lower() and 
-                confirmation.lower() in tool_contents.lower()):
-                completion_detected = True
-                completion_reason = reason
-                break
-        
-        # Self-reflection message
-        reflection = f"""
-                    REFLECTION:
-                    Step {self.state.step_count}/{self.state.max_steps}
-                    Recent results: {truncate_text(tool_contents, 300)}
-                    Visited elements: {len(self.state.visited_elements)}
-                    Navigation history: {len(self.state.navigation_history)} pages
-                    Errors: {len(self.state.errors)}
-                    Task complete: {completion_detected}
-                    """
-        
-        if completion_detected:
-            reflection += f"\nTask appears complete: {completion_reason}"
-            self.state.task_complete = True
-            return {"messages": messages + [AIMessage(content=reflection)]}
-            
-        return {"messages": messages}
-        print(state['messages'])
+    
 
     def route_from_planner(self, state: MessagesState):
         """Determine next state after planning."""
         messages = state["messages"]
         last_message = messages[-1]
+        # Always proceed to executor (reflection removed)
+        return "executor"
+
+    def filler_node(self, state: MessagesState):
+        """Specialized node for filling forms."""
+        messages = state["messages"]
+        page_context = f"Current page snapshot:\n{self.state.page_state.get('snapshot_text', '')}"
+        filler_prompt = FILLER_PROMPT_TEMPLATE.format(page_context=page_context)
         
-        # Route to exit if task complete was flagged
-        if self.state.task_complete:
-            return "exit"
-            
-        # Route to executor if there are tool calls
-        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-            return "executor"
-            
-        # Route to reflector for messages without tool calls
-        # This allows for task completion detection
-        return "reflector"
+        filler_messages = [
+            SystemMessage(content=filler_prompt),
+            messages[-1] # Pass the snapshot summary
+        ]
+
+        try:
+            response = self.llm.invoke(filler_messages)
+            response.content = f"Filling form based on snapshot. {response.content or ''}"
+            return {"messages": messages + [response]}
+        except Exception as e:
+            error_msg = f"Error in filler node: {str(e)}"
+            return {"messages": messages + [AIMessage(content=error_msg)]}
+
+    def route_after_execution(self, state: MessagesState):
+        """Route after tool execution to either the filler or planner."""
+        last_message = state["messages"][-1]
+        if isinstance(last_message, ToolMessage):
+            if "browser_snapshot" in last_message.tool_call_id:
+                # Check if the snapshot has multiple input fields
+                if self.state.page_state.get("inputs") and len(self.state.page_state["inputs"]) > 1:
+                    return "filler"
+        return "planner"
+
 
     async def run(self, goal: str):
         """Run the agent with the given goal."""

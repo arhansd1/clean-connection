@@ -43,17 +43,10 @@ check the deetails of each tool before using them
 Current progress: Step {step_count}
 
 ### GUIDELINES:
-1. Always aim for the most direct path to completing the job application.
-2. STRICT : Use MULTIPLE tools at the same time when possible (e.g., `click + snapshot`, or `extract_text + extract_form_fields`).
-3. For navigation:
-   - Start by going to the given job posting or careers page URL.
-   - Immediately check for the **Apply here button** based on the page data (or equivalent call-to-action).
-   - If found, `click` it and immediately `snapshot` the page.
-   - If and only if the apply button is not found through `extract_text`, click a `snapshot` and search for the button in parsed data.
-4. For form filling:
-   - First, `snapshot` and `extract_form_fields` to gather ALL required input fields at once.
-   - Then, fill them systematically with the provided candidate data or fill some dummy data.
-   - Only after confirming all required fields are filled, proceed to `submit`.
+1. **Navigate and Identify**: Your primary job is to navigate to the correct pages, identify key elements, and take snapshots.
+2. **Click and Snapshot**: When you find a key element like an "Apply" button, `click` it and then immediately use `browser_snapshot` to see the result.
+3. **Delegate Form Filling**: Do NOT fill out forms yourself. When you take a snapshot of a page with a form, the system will automatically route to a specialist for form-filling.
+4. **High-Level Planning**: Focus on the overall goal, such as getting to the application page or reaching the confirmation page. Leave fine-grained tasks to other components.
 5. Provide clear, concise reasoning for each step, but keep actions prioritized over narration.
 6. If an action fails (e.g., a selector doesn’t work), try an alternative such as scrolling, trying a different selector, or re-extracting elements.
 7. NEVER hallucinate or invent elements that are not visible in the snapshot or extracted nodes.
@@ -65,14 +58,13 @@ I'll help you accomplish your web automation goal step by step.
 """
 
 
-REFLECTION_PROMPT = """
-Analyze the current state and determine if we've completed the goal:
-   
-1. What was the original goal?
-2. What have we accomplished so far?
-3. What remains to be done?
-4. Are there any blockers or errors preventing progress?
-5. What's the next most logical step?
+FILLER_PROMPT_TEMPLATE = """You are a form-filling specialist. Your task is to analyze the provided page snapshot and fill out all form fields in a single step. Use the `browser_type`, `browser_select_option`, and `browser_upload_file` tools to accomplish this.
 
-Give a clear yes/no assessment of whether the goal has been completed.
+### INSTRUCTIONS:
+1.  **Analyze the Snapshot**: Carefully review the page snapshot to identify all input fields, dropdowns, text areas, and file upload fields.
+2.  **Generate Tool Calls**: Create a list of tool calls to fill all required fields. Use dummy data where appropriate.
+3.  **File Uploads**: For any file input fields, use the `browser_upload_file` tool with the path "/sample.pdf". This sample file is already available in the working directory.
+4.  **Submit**: After filling all fields, use the `browser_click` tool to submit the form.
+
+{page_context}
 """
