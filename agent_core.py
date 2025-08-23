@@ -1,5 +1,6 @@
 """Core agent logic and orchestration."""
 import asyncio
+import json
 from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass, field
 
@@ -58,13 +59,9 @@ class WebAgent:
         workflow.add_conditional_edges(
             "planner",
             self.route_from_planner,
-            {"executor": "executor"}
+            {"executor": "executor", "filler": "filler"}
         )
-        workflow.add_conditional_edges(
-            "executor",
-            self.route_after_execution,
-            {"filler": "filler", "planner": "planner"}
-        )
+        workflow.add_edge("executor", "planner")
         workflow.add_edge("filler", "executor")
         
         return workflow.compile()
@@ -138,6 +135,7 @@ class WebAgent:
                 response.content = f"Planning next steps: {tools_desc}"
 
             self.state.step_count += 1
+            print(response)
             # Add both the rebuilt system prompt and response to history
             return {"messages": messages + [response]}
 
@@ -205,6 +203,24 @@ class WebAgent:
                 self.state.current_url = url
             
             try:
+                # Unwrap kwargs if present
+                if isinstance(tool_args, dict):
+                    if "kwargs" in tool_args and isinstance(tool_args["kwargs"], str):
+                        try:
+                            tool_args = json.loads(tool_args["kwargs"])
+                        except:
+                            pass
+                
+                # Ensure both element and ref are present for relevant tools
+                if tool_name in ["browser_type", "browser_click", "browser_select_option"]:
+                    # If we have ref but no element, try to find the element from page state
+                    if "ref" in tool_args and "element" not in tool_args:
+                        if self.state.page_state and "refs" in self.state.page_state:
+                            for element, refs in self.state.page_state["refs"].items():
+                                if tool_args["ref"] in refs:
+                                    tool_args["element"] = element
+                                    break
+                
                 # Print raw metadata before execution
                 print(f"\n[TOOL_METADATA] name={tool_name} args={tool_args} call_id={tool_id}")
                 
@@ -262,36 +278,80 @@ class WebAgent:
         """Determine next state after planning."""
         messages = state["messages"]
         last_message = messages[-1]
-        # Always proceed to executor (reflection removed)
+
+        # If we have page state, check for form indicators
+        if self.state.page_state:
+            form_indicators = 0
+            
+            # Check for multiple input fields
+            inputs = self.state.page_state.get("inputs", [])
+            if len(inputs) >= 2:  # At least two input fields
+                form_indicators += 1
+            
+            # Check for common form field names
+            common_fields = {"name", "email", "phone", "address", "password"}
+            field_matches = sum(1 for field in inputs if any(common in field.lower() for common in common_fields))
+            if field_matches >= 1:
+                form_indicators += 1
+            
+            # Check for required fields (marked with *)
+            required_fields = sum(1 for field in inputs if "*" in field)
+            if required_fields > 0:
+                form_indicators += 1
+                
+            # Check for submit/continue buttons along with inputs
+            buttons = self.state.page_state.get("buttons", [])
+            submit_buttons = any(b.lower() in ["submit", "continue", "next", "apply"] for b in buttons)
+            if submit_buttons and inputs:
+                form_indicators += 1
+            
+            # If we have enough form indicators and not in a filling loop
+            if form_indicators >= 2:  # At least 2 indicators needed
+                # Check if we're not already in a form-filling loop
+                recent_fill_attempts = len([m for m in messages[-3:] if isinstance(m, ToolMessage) and "browser_type" in str(m.content)])
+                if recent_fill_attempts < 3:  # Allow up to 3 consecutive fill attempts
+                    return "filler"
+        
+        # Otherwise proceed to executor
         return "executor"
 
     def filler_node(self, state: MessagesState):
         """Specialized node for filling forms."""
         messages = state["messages"]
-        page_context = f"Current page snapshot:\n{self.state.page_state.get('snapshot_text', '')}"
+        
+        # Create a form context with all the form fields and their references
+        form_fields = []
+        if self.state.page_state:
+            inputs = self.state.page_state.get("inputs", [])
+            refs = self.state.page_state.get("refs", {})
+            for input_field in inputs:
+                ref = refs.get(input_field, [''])[0]
+                form_fields.append(f"- {input_field} (ref: {ref})")
+        
+        page_context = (
+            f"Current page: {self.state.current_url}\n"
+            f"Form fields available:\n" + "\n".join(form_fields)
+        )
+        
         filler_prompt = FILLER_PROMPT_TEMPLATE.format(page_context=page_context)
         
+        # Create a proper message sequence for the LLM
         filler_messages = [
             SystemMessage(content=filler_prompt),
-            messages[-1] # Pass the snapshot summary
+            HumanMessage(content="Please fill out this form with appropriate dummy data."),
         ]
 
         try:
             response = self.llm.invoke(filler_messages)
-            response.content = f"Filling form based on snapshot. {response.content or ''}"
+            if not response.content:
+                response.content = "Planning to fill out the form fields."
             return {"messages": messages + [response]}
         except Exception as e:
             error_msg = f"Error in filler node: {str(e)}"
             return {"messages": messages + [AIMessage(content=error_msg)]}
 
     def route_after_execution(self, state: MessagesState):
-        """Route after tool execution to either the filler or planner."""
-        last_message = state["messages"][-1]
-        if isinstance(last_message, ToolMessage):
-            if "browser_snapshot" in last_message.tool_call_id:
-                # Check if the snapshot has multiple input fields
-                if self.state.page_state.get("inputs") and len(self.state.page_state["inputs"]) > 1:
-                    return "filler"
+        """Route after tool execution back to planner."""
         return "planner"
 
 

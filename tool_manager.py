@@ -111,7 +111,14 @@ class ToolManager:
             # Unwrap nested call_kwargs if present
             if "call_kwargs" in kwargs and isinstance(kwargs["call_kwargs"], dict) and len(kwargs) == 1:
                 kwargs = kwargs["call_kwargs"]
-                
+            
+            # Handle kwargs string
+            if "kwargs" in kwargs and isinstance(kwargs["kwargs"], str):
+                try:
+                    kwargs = json.loads(kwargs["kwargs"])
+                except:
+                    pass
+                    
             # Call the actual MCP tool
             result = await self.session.call_tool(name, kwargs)
             
