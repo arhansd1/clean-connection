@@ -44,7 +44,7 @@ async def run_automation(goal: str, config: Optional[Dict[str, Any]] = None):
                 raise ValueError("Missing Google API key. Set GOOGLE_API_KEY environment variable.")
                 
             # Initialize LLM
-            model_name = config.get("model_name") or os.getenv("MODEL_NAME", "gemini-2.5-flash-lite")
+            model_name = config.get("model_name") or os.getenv("MODEL_NAME", "gemini-2.5-flash")
             llm = ChatGoogleGenerativeAI(
                 model=model_name,
                 google_api_key=api_key,
@@ -89,7 +89,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Web Automation Agent")
     parser.add_argument("goal", nargs="*", help="User goal for web automation")
     parser.add_argument("--api-key", help="Google API key (overrides environment variable)")
-    parser.add_argument("--model", help="Model name (default: gemini-2.5-flash-lite)")
+    parser.add_argument("--model", help="Model name (default: gemini-2.5-flash)")
     parser.add_argument("--max-steps", type=int, default=50, help="Maximum execution steps")
     
     args = parser.parse_args()

@@ -130,6 +130,7 @@ class WebAgent:
             invoke_messages = self._prepare_invoke_messages(messages, keep_last=5)
 
             # Call LLM with structured messages
+            print(state['messages'])
             response = self.llm.invoke(invoke_messages)
 
             # If LLM returned tool calls but no content, add descriptive content
@@ -208,11 +209,15 @@ class WebAgent:
             try:
                 # Unwrap kwargs if present
                 if isinstance(tool_args, dict):
-                    if "kwargs" in tool_args and isinstance(tool_args["kwargs"], str):
-                        try:
-                            tool_args = json.loads(tool_args["kwargs"])
-                        except:
-                            pass
+                    if "kwargs" in tool_args:
+                        if isinstance(tool_args["kwargs"], str):
+                            try:
+                                tool_args = json.loads(tool_args["kwargs"])
+                            except:
+                                pass
+                        else:
+                            # Flatten the kwargs structure
+                            tool_args = tool_args["kwargs"]
                 
                 # Ensure both element and ref are present for relevant tools
                 if tool_name in ["browser_type", "browser_click", "browser_select_option"]:
@@ -229,6 +234,7 @@ class WebAgent:
                 
                 try:
                     result = await self.tool_manager.execute_tool(tool_name, tool_args)
+                    print(state['messages'])
                     print(f"   - {tool_name} executed successfully")
                 except Exception as e:
                     print(f"   - Error executing {tool_name}: {str(e)}")
