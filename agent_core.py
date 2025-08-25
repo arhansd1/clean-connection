@@ -84,7 +84,10 @@ class WebAgent:
                 page_summary += f"Title: {self.state.page_state.get('title')}\n"
             if "buttons" in self.state.page_state:
                 buttons = self.state.page_state["buttons"]
-                page_summary += f"Buttons: {', '.join(buttons[:5])}\n"
+                page_summary += f"Buttons ({len(buttons)}): {', '.join(buttons[:10])}"
+                if len(buttons) > 10:
+                    page_summary += f"... and {len(buttons) - 10} more"
+                page_summary += "\n"
             if "element_refs" in self.state.page_state:
                 refs = self.state.page_state["element_refs"]
                 ref_items = []
@@ -255,7 +258,8 @@ class WebAgent:
                     
                     print(f"   - Snapshot summary generated")
                     print(f"   - Title: {page_elements.get('title', 'Unknown')}")
-                    print(f"   - Buttons: {len(page_elements.get('buttons', []))}")
+                    buttons = page_elements.get('buttons', [])
+                    print(f"   - Buttons ({len(buttons)}): {', '.join(buttons[:5])}" + ("..." if len(buttons) > 5 else ""))
                     print(f"   - Inputs: {len(page_elements.get('inputs', []))}")
                     results.append(ToolMessage(content=summary, tool_call_id=tool_id))
                 else:
