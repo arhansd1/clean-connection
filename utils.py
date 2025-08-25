@@ -18,6 +18,7 @@ def _is_interactive_line(line_lower: str) -> bool:
 
 
 def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
+    print("\nSNAPSHOT TEXT", snapshot_text ,"\n")
     lines = snapshot_text.splitlines()
     result = {
         "title": None,
@@ -28,11 +29,12 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
         "tabs": [],
         "refs": {},
         "interactives": [],
-        "all_clickables": []  # New field for all clickable elements
+        "all_clickables": []
     }
     
     ref_pattern = re.compile(r"\[ref=(e\d+)\]")
     quoted_pattern = re.compile(r'"(.+?)"')
+    icon_pattern = re.compile(r'<svg[^>]*>.*?</svg>|<i[^>]*>.*?</i>|<img[^>]*>', re.DOTALL)
     
     for line in lines:
         line_lower = line.lower()
@@ -41,6 +43,9 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
         if result["title"] is None and "page title:" in line_lower:
             result["title"] = line.split(":", 1)[-1].strip()
             continue
+        
+        # Check if this is a button element
+        is_button = 'button ' in f" {line_lower} "
         
         # Extract all interactive elements with better pattern matching
         interactive_keywords = [
@@ -54,6 +59,17 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
         if is_interactive:
             # Extract all quoted text (potential labels)
             labels = quoted_pattern.findall(line)
+            
+            # If no labels but it's a button, check for icon or generate a generic name
+            if not labels and is_button:
+                # Check for icon
+                if icon_pattern.search(line):
+                    labels = ["icon_button"]
+                # Or use a generic name based on the element type
+                elif 'plus' in line_lower or 'add' in line_lower:
+                    labels = ["add_button"]
+                else:
+                    labels = ["button"]
             
             # Extract reference
             refs = ref_pattern.findall(line)
@@ -69,7 +85,7 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
             elif "link" in line_lower:
                 element_type = "link"
             elif any(kw in line_lower for kw in ["checkbox", "radio", "select"]):
-                element_type = "input"  # Group these as inputs
+                element_type = "input"
                 
             # Add to appropriate category
             for label in labels:

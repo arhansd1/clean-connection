@@ -130,7 +130,6 @@ class WebAgent:
             invoke_messages = self._prepare_invoke_messages(messages, keep_last=5)
 
             # Call LLM with structured messages
-            print(state['messages'])
             response = self.llm.invoke(invoke_messages)
 
             # If LLM returned tool calls but no content, add descriptive content
@@ -234,7 +233,6 @@ class WebAgent:
                 
                 try:
                     result = await self.tool_manager.execute_tool(tool_name, tool_args)
-                    print(state['messages'])
                     print(f"   - {tool_name} executed successfully")
                 except Exception as e:
                     print(f"   - Error executing {tool_name}: {str(e)}")

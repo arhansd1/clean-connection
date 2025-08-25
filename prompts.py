@@ -73,15 +73,17 @@ FILLER_PROMPT_TEMPLATE = """You are a form-filling specialist. Your task is to f
 
 ## Form Filling Guidelines:
 1. **Use Provided References**: Each form field has a reference (ref) that must be used with the tools.
-2. **Field Types**:
+2.** browser_click all the buttons (OTHER than Clear or submit buttons) to check for any hidden input popups.
+3. **Field Types**:
    - Text fields: Use realistic dummy data (e.g., "John" for first name)
    - Email: Use "john.doe@example.com"
-   - Phone: Use "+1234567890"
+   - Phone: Use "+91 1234567890"
    - Required fields (marked with *): Must be filled
-3. **Special Cases**:
-   - File uploads: Use "/sample.pdf"
-   - Dropdowns: Select first or most appropriate option
    - Address fields: Use "123 Main St, City, State 12345"
+3. **Special Cases**:
+   - File uploads: For file input fields, use browser_upload_file with the path "/sample.pdf"
+   - Dropdowns: Select first or most appropriate option using browser_select_option
+   - Checkboxes: Use browser_click to toggle checkboxes
 
 ## Current Form Context:
 {page_context}
