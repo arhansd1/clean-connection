@@ -327,21 +327,65 @@ class WebAgent:
         """Specialized node for filling forms."""
         messages = state["messages"]
         
-        # Create a form context with all the form fields and their references
+        # Create a form context with all the form fields, buttons, and their references
         form_fields = []
+        buttons = []
+        
         if self.state.page_state:
+            # Add input fields
             inputs = self.state.page_state.get("inputs", [])
             refs = self.state.page_state.get("refs", {})
+            
+            # Track which refs we've already added to avoid duplicates
+            added_refs = set()
+            
+            # Add input fields
             for input_field in inputs:
                 ref = refs.get(input_field, [''])[0]
-                form_fields.append(f"- {input_field} (ref: {ref})")
+                if ref and ref not in added_refs:
+                    form_fields.append(f"- {input_field} (ref: {ref})")
+                    added_refs.add(ref)
+            
+            # Add buttons
+            buttons_list = self.state.page_state.get("buttons", [])
+            for button in buttons_list:
+                ref = refs.get(button, [''])[0]
+                if ref and ref not in added_refs:
+                    # Special handling for common button types
+                    if button in ['+', 'plus', 'add']:
+                        buttons.append(f"- '+' button (ref: {ref})")
+                    elif 'choose file' in button.lower() or 'upload' in button.lower():
+                        buttons.append(f"- 'Choose File' button (ref: {ref})")
+                    else:
+                        buttons.append(f"- '{button}' button (ref: {ref})")
+                    added_refs.add(ref)
         
-        page_context = (
-            f"Current page: {self.state.current_url}\n"
-            f"Form fields available:\n" + "\n".join(form_fields)
-        )
+        # Build the full context
+        context_parts = [f"Current page: {self.state.current_url}"]
+        
+        if form_fields:
+            context_parts.append("\nForm fields available:" + "\n" + "\n".join(form_fields))
+        
+        if buttons:
+            context_parts.append("\nButtons available:" + "\n" + "\n".join(buttons))
+        
+        page_context = "\n".join(context_parts)
+        
+        # Debug: Print the page context being sent to the LLM
+        print("\n" + "="*80)
+        print("PAGE CONTEXT BEING SENT TO LLM:")
+        print("="*80)
+        print(page_context)
+        print("="*80 + "\n")
         
         filler_prompt = FILLER_PROMPT_TEMPLATE.format(page_context=page_context)
+        
+        # Debug: Print the full prompt being sent to the LLM
+        print("\n" + "="*80)
+        print("FULL PROMPT BEING SENT TO LLM:")
+        print("="*80)
+        print(filler_prompt)
+        print("="*80 + "\n")
         
         # Create a proper message sequence for the LLM
         filler_messages = [

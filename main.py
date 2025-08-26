@@ -96,7 +96,7 @@ async def main():
    
     # Default goal if none provided
     goal = "".join(args.goal) if args.goal else (
-        "Navigate to https://job.10xscale.ai/4846461985313787904 and find apply here button and click that then, get all the job query form fields and fill them with dummy data and submit the form. "
+        "Navigate to https://job.10xscale.ai/4846461985313787904 , get all the job query form fields and fill them with dummy data and submit the form. "
     )
 
     config = {

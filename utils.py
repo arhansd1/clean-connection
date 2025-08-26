@@ -1,5 +1,4 @@
 """Utility functions for web automation agent."""
-"""Utility functions for web automation agent."""
 import re
 from typing import Dict, Any, List, Optional
 
@@ -36,6 +35,39 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
     quoted_pattern = re.compile(r'"(.+?)"')
     icon_pattern = re.compile(r'<svg[^>]*>.*?</svg>|<i[^>]*>.*?</i>|<img[^>]*>', re.DOTALL)
     
+    # First pass: collect context information
+    context_map = {}  # ref -> nearby text context
+    
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        refs = ref_pattern.findall(line)
+        
+        if refs:
+            for ref in refs:
+                # Collect context from current and nearby lines
+                context_lines = []
+                
+                # Look backwards for context (up to 3 lines)
+                for j in range(max(0, i-3), i):
+                    prev_line = lines[j].strip()
+                    if prev_line and not ref_pattern.search(prev_line):
+                        # Extract meaningful text (not just structural elements)
+                        text_content = re.sub(r'^\s*-\s*', '', prev_line)  # Remove list markers
+                        text_content = re.sub(r':\s*$', '', text_content)  # Remove trailing colons
+                        if len(text_content) > 1 and not text_content.lower() in ['generic', 'text']:
+                            context_lines.append(text_content)
+                
+                # Look forwards for context (up to 2 lines)
+                for j in range(i+1, min(len(lines), i+3)):
+                    next_line = lines[j].strip()
+                    if next_line and not ref_pattern.search(next_line):
+                        text_content = re.sub(r'^\s*-\s*', '', next_line)
+                        text_content = re.sub(r':\s*$', '', text_content)
+                        if len(text_content) > 1 and not text_content.lower() in ['generic', 'text']:
+                            context_lines.append(text_content)
+                
+                context_map[ref] = context_lines
+    
     for line in lines:
         line_lower = line.lower()
         
@@ -54,29 +86,78 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
         ]
         
         # Check if this line contains any interactive element
-        is_interactive = any(f" {kw} " in f" {line_lower} " for kw in interactive_keywords)
+        is_button = 'button' in line_lower
+        is_interactive = any(f' {kw} ' in f' {line_lower} ' for kw in interactive_keywords)
         
-        if is_interactive:
+        if is_interactive or is_button:
             # Extract all quoted text (potential labels)
             labels = quoted_pattern.findall(line)
-            
-            # If no labels but it's a button, check for icon or generate a generic name
-            if not labels and is_button:
-                # Check for icon
-                if icon_pattern.search(line):
-                    labels = ["icon_button"]
-                # Or use a generic name based on the element type
-                elif 'plus' in line_lower or 'add' in line_lower:
-                    labels = ["add_button"]
-                else:
-                    labels = ["button"]
             
             # Extract reference
             refs = ref_pattern.findall(line)
             
+            # If no labels found, try to generate meaningful labels
+            if not labels and refs:
+                ref = refs[0]  # Use first ref
+                
+                # Try to get label from context
+                context_lines = context_map.get(ref, [])
+                potential_labels = []
+                
+                for context in context_lines:
+                    # Clean up context text - remove special markers and trim
+                    clean_context = re.sub(r'^text:\s*', '', context)  # Remove 'text:' prefix if present
+                    clean_context = re.sub(r'[*"]+', '', clean_context).strip()
+                    
+                    # Skip very short or generic text
+                    if len(clean_context) > 2 and clean_context.lower() not in ['generic', 'text', 'img']:
+                        potential_labels.append(clean_context)
+                
+                # Use the most relevant context as label
+                if potential_labels:
+                    # Prioritize labels that seem more descriptive
+                    best_label = None
+                    for label in potential_labels:
+                        label_lower = label.lower()
+                        # Prefer labels with common form field terms
+                        if any(term in label_lower for term in ['upload', 'resume', 'cv', 'file', 'portfolio', 'work', 'link']):
+                            best_label = label
+                            break
+                        # Or use the first non-generic one
+                        elif not best_label and len(label) > 3:
+                            best_label = label
+                    
+                    if best_label:
+                        labels = [best_label]
+                
+                # If still no labels but it's a button, try to infer from element type
+                if not labels and is_button:
+                    if icon_pattern.search(line):
+                        # Try to get label from nearby text or context
+                        if context_lines:
+                            # Look for descriptive text in context
+                            for context in context_lines:
+                                if any(term in context.lower() for term in ['upload', 'file', 'choose', 'portfolio', 'work']):
+                                    labels = [context.strip().replace('"', '')]
+                                    break
+                        
+                        if not labels:
+                            labels = ["icon_button"]
+                    elif 'plus' in line_lower or 'add' in line_lower:
+                        labels = ["add_button"]
+                    elif '>' in line and '<' in line:
+                        # Extract text between > and <
+                        text_match = re.search(r'>([^<]+)<', line)
+                        if text_match and text_match.group(1).strip():
+                            labels = [text_match.group(1).strip()]
+                        else:
+                            labels = ["button"]
+                    else:
+                        labels = ["button"]
+            
             # Classify the element type
             element_type = "unknown"
-            if "button" in line_lower:
+            if is_button or 'button' in line_lower:
                 element_type = "button"
             elif "tab" in line_lower:
                 element_type = "tab"
@@ -86,10 +167,15 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
                 element_type = "link"
             elif any(kw in line_lower for kw in ["checkbox", "radio", "select"]):
                 element_type = "input"
-                
+            
             # Add to appropriate category
             for label in labels:
                 if label:
+                    # Clean up the label
+                    label = label.strip().replace('"', '')
+                    if not label:
+                        continue
+                        
                     # Add to specific category
                     if element_type == "button" and label not in result["buttons"]:
                         result["buttons"].append(label)
@@ -233,16 +319,12 @@ def analyze_goal(goal_text: str) -> Dict[str, Any]:
         "requires_submission": any(kw in goal_lower for kw in ["submit", "send", "complete", "finish"]),
         "requires_extraction": any(kw in goal_lower for kw in ["extract", "get", "find", "list", "scrape"]),
         "requires_screenshot": any(kw in goal_lower for kw in ["screenshot", "capture", "image", "photo"]),
-        "requires_download": any(kw in goal_lower for kw in ["download", "save", "file"]),
+        "requires_download": any(kw in goal_lower for kw in ["download", "save"]),
+        "requires_file_upload": any(kw in goal_lower for kw in ["upload" , "file" , "resume", "pdf"])
     }
     url_match = re.search(r"https?://[^\s)\"']+", goal_text)
     analysis["target_url"] = url_match.group(0) if url_match else None
     return analysis
-
-
-
-
-
 
 # # =====================================================================
 # # REAL-WEB INTEGRATION TESTS FOR utils.py (Verbose + Live Snapshots)

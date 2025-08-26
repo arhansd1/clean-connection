@@ -84,6 +84,9 @@ FILLER_PROMPT_TEMPLATE = """You are a form-filling specialist. Your task is to f
    - File uploads: For file input fields, use browser_upload_file with the path "/sample.pdf"
    - Dropdowns: Select first or most appropriate option using browser_select_option
    - Checkboxes: Use browser_click to toggle checkboxes
+4. After filling click the submit button . If the form is successfully submitted, clearly state:  **" Task complete: Job application submitted. STOP"**
+5. If submittion fails , click_snaphot , analyse direct snapshot to check what is missed and fill accordingly . Go back to step 4 if filled .
+
 
 ## Current Form Context:
 {page_context}
