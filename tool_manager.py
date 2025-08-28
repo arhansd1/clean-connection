@@ -193,6 +193,40 @@ class ToolManager:
                     # Found a reference, use it instead
                     args = {"ref": ref}
                     print(f"Found reference {ref} for element '{element_text}'")
+
+        # Handle file upload parameter conversion
+        if name == "browser_file_upload":
+            # Convert any file path parameter to the required paths array
+            file_path = args.get("filePath")
+            if not file_path:
+                return "Error: No file path provided for upload"
+                
+            # Prepare upload args with just the essential parameters
+            upload_args = {"paths": [file_path]}
+            if "ref" in args:
+                upload_args["ref"] = args["ref"]
+                
+                # Only attempt to click if we have a ref
+                try:
+                    # Get the element text from the ref if available
+                    element_text = f"ref:{args['ref']}"  # Default element text
+                    if hasattr(self, 'state') and hasattr(self.state, 'page_state') and 'refs' in self.state.page_state:
+                        for text, refs in self.state.page_state['refs'].items():
+                            if args['ref'] in refs:
+                                element_text = text
+                                break
+                    
+                    # Single click attempt with both ref and element
+                    await self.session.call_tool(
+                        "browser_click", 
+                        {"ref": args['ref'], "element": element_text}
+                    )
+                except Exception as e:
+                    # If click fails, still try the upload as some file inputs don't need a click
+                    pass
+            
+            # Update args for the actual upload
+            args = upload_args
         
 
         # Adapt common parameter synonyms
@@ -413,8 +447,7 @@ async def test_click_with_selector(url: str) -> TestResult:
                 snap_step = await execute_and_log(tm, "browser_snapshot", {}, capture_snapshot_counts=True)
                 steps.append(snap_step)
 
-                import re as _re
-                labels = _re.findall(r'"([^"]{1,60})"', snap_step.output_truncated)
+                labels = re.findall(r'"([^"]{1,60})"', snap_step.output_truncated)
                 candidates = [l for l in labels if l and len(l.split()) <= 5]
                 if not candidates:
                     return TestResult(name, True, "No clickable labels (skipped)", steps)

@@ -329,7 +329,8 @@ class WebAgent:
         
         # Create a form context with all the form fields, buttons, and their references
         form_fields = []
-        buttons = []
+        interactive_buttons = []
+        submission_buttons = []
         
         if self.state.page_state:
             # Add input fields
@@ -345,19 +346,18 @@ class WebAgent:
                 if ref and ref not in added_refs:
                     form_fields.append(f"- {input_field} (ref: {ref})")
                     added_refs.add(ref)
-            
-            # Add buttons
+
+            # Add and categorize buttons
             buttons_list = self.state.page_state.get("buttons", [])
+            submission_keywords = ["submit", "clear", "cancel", "next", "apply", "finish", "send"]
             for button in buttons_list:
                 ref = refs.get(button, [''])[0]
                 if ref and ref not in added_refs:
-                    # Special handling for common button types
-                    if button in ['+', 'plus', 'add']:
-                        buttons.append(f"- '+' button (ref: {ref})")
-                    elif 'choose file' in button.lower() or 'upload' in button.lower():
-                        buttons.append(f"- 'Choose File' button (ref: {ref})")
+                    button_lower = button.lower()
+                    if any(keyword in button_lower for keyword in submission_keywords):
+                        submission_buttons.append(f"- '{button}' button (ref: {ref})")
                     else:
-                        buttons.append(f"- '{button}' button (ref: {ref})")
+                        interactive_buttons.append(f"- '{button}' button (ref: {ref})")
                     added_refs.add(ref)
         
         # Build the full context
@@ -366,8 +366,11 @@ class WebAgent:
         if form_fields:
             context_parts.append("\nForm fields available:" + "\n" + "\n".join(form_fields))
         
-        if buttons:
-            context_parts.append("\nButtons available:" + "\n" + "\n".join(buttons))
+        if interactive_buttons:
+            context_parts.append("\nInteractive buttons (for revealing fields):" + "\n" + "\n".join(interactive_buttons))
+
+        if submission_buttons:
+            context_parts.append("\nSubmission buttons (for final actions):" + "\n" + "\n".join(submission_buttons))
         
         page_context = "\n".join(context_parts)
         

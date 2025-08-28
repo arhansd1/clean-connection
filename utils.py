@@ -68,6 +68,8 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
                 
                 context_map[ref] = context_lines
     
+    
+    file_keywords = ["upload", "file", "resume", "cv", "document", "pdf"]
     for line in lines:
         line_lower = line.lower()
         
@@ -202,6 +204,25 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
                                 result["refs"][label] = []
                             if ref not in result["refs"][label]:
                                 result["refs"][label].append(ref)
+    
+    # ---------------- Added: better file input detection ---------------- #
+    for line in lines:
+        line_lower = line.lower()
+        if any(kw in line_lower for kw in file_keywords) and ("input" in line_lower or "button" in line_lower):
+            labels = quoted_pattern.findall(line)
+            refs = ref_pattern.findall(line)
+            
+            if labels and refs:
+                label = labels[0]
+                ref = refs[0]
+                
+                # Add to inputs with special marker
+                result["inputs"].append(f"file:{label}")
+                if f"file:{label}" not in result["refs"]:
+                    result["refs"][f"file:{label}"] = []
+                if ref not in result["refs"][f"file:{label}"]:
+                    result["refs"][f"file:{label}"].append(ref)
+    # -------------------------------------------------------------------- #
     
     return result
 
