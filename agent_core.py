@@ -324,53 +324,104 @@ class WebAgent:
         return "executor"
 
     def filler_node(self, state: MessagesState):
-        """Specialized node for filling forms."""
+        """Specialized node for filling forms with enhanced field handling."""
         messages = state["messages"]
         
         # Create a form context with all the form fields, buttons, and their references
         form_fields = []
         interactive_buttons = []
         submission_buttons = []
+        dropdowns = []
+        radio_groups = []
+        checkboxes = []
         
         if self.state.page_state:
-            # Add input fields
-            inputs = self.state.page_state.get("inputs", [])
+            # Get all element references
             refs = self.state.page_state.get("refs", {})
             
             # Track which refs we've already added to avoid duplicates
             added_refs = set()
             
-            # Add input fields
+            # 1. Process regular input fields
+            inputs = self.state.page_state.get("inputs", [])
             for input_field in inputs:
                 ref = refs.get(input_field, [''])[0]
                 if ref and ref not in added_refs:
-                    form_fields.append(f"- {input_field} (ref: {ref})")
+                    # Categorize field type based on name
+                    field_lower = input_field.lower()
+                    if any(kw in field_lower for kw in ["email", "e-mail"]):
+                        form_fields.append(f"- Email: {input_field} (ref: {ref}) [Type: email]")
+                    elif any(kw in field_lower for kw in ["phone", "mobile", "telephone"]):
+                        form_fields.append(f"- Phone: {input_field} (ref: {ref}) [Type: phone]")
+                    elif any(kw in field_lower for kw in ["name", "first", "last"]):
+                        form_fields.append(f"- Name: {input_field} (ref: {ref}) [Type: text]")
+                    else:
+                        form_fields.append(f"- {input_field} (ref: {ref}) [Type: text]")
+                    added_refs.add(ref)
+            
+            # 2. Process dropdowns/selects
+            dropdowns_list = self.state.page_state.get("comboboxes", [])
+            for dropdown in dropdowns_list:
+                ref = refs.get(dropdown, [''])[0]
+                if ref and ref not in added_refs:
+                    dropdowns.append(f"- Dropdown: {dropdown} (ref: {ref})")
+                    added_refs.add(ref)
+            
+            # 3. Process radio groups
+            radio_groups_list = self.state.page_state.get("radio_groups", [])
+            for radio in radio_groups_list:
+                ref = refs.get(radio, [''])[0]
+                if ref and ref not in added_refs:
+                    radio_groups.append(f"- Radio group: {radio} (ref: {ref})")
+                    added_refs.add(ref)
+            
+            # 4. Process checkboxes
+            checkboxes_list = self.state.page_state.get("checkboxes", [])
+            for checkbox in checkboxes_list:
+                ref = refs.get(checkbox, [''])[0]
+                if ref and ref not in added_refs:
+                    checkboxes.append(f"- Checkbox: {checkbox} (ref: {ref})")
                     added_refs.add(ref)
 
-            # Add and categorize buttons
+            # 5. Categorize buttons
             buttons_list = self.state.page_state.get("buttons", [])
-            submission_keywords = ["submit", "clear", "cancel", "next", "apply", "finish", "send"]
+            submission_keywords = ["submit", "next", "continue", "apply", "finish"]
+            interactive_keywords = ["add", "more", "upload", "browse", "choose", "select"]
+            
             for button in buttons_list:
                 ref = refs.get(button, [''])[0]
                 if ref and ref not in added_refs:
                     button_lower = button.lower()
                     if any(keyword in button_lower for keyword in submission_keywords):
-                        submission_buttons.append(f"- '{button}' button (ref: {ref})")
+                        submission_buttons.append(f"- Submit button: '{button}' (ref: {ref})")
+                    elif any(keyword in button_lower for keyword in interactive_keywords):
+                        interactive_buttons.append(f"- Action button: '{button}' (ref: {ref})")
                     else:
-                        interactive_buttons.append(f"- '{button}' button (ref: {ref})")
+                        interactive_buttons.append(f"- Button: '{button}' (ref: {ref})")
                     added_refs.add(ref)
         
-        # Build the full context
-        context_parts = [f"Current page: {self.state.current_url}"]
+        # Build the full context with clear section headers
+        context_parts = [
+            f"=== CURRENT PAGE ===\n{self.state.current_url}"
+        ]
         
         if form_fields:
-            context_parts.append("\nForm fields available:" + "\n" + "\n".join(form_fields))
+            context_parts.append("\n=== TEXT FIELDS ===\n" + "\n".join(form_fields))
+        
+        if dropdowns:
+            context_parts.append("\n=== DROPDOWN MENUS ===\n" + "\n".join(dropdowns))
+        
+        if radio_groups:
+            context_parts.append("\n=== RADIO BUTTON GROUPS ===\n" + "\n".join(radio_groups))
+        
+        if checkboxes:
+            context_parts.append("\n=== CHECKBOXES ===\n" + "\n".join(checkboxes))
         
         if interactive_buttons:
-            context_parts.append("\nInteractive buttons (for revealing fields):" + "\n" + "\n".join(interactive_buttons))
+            context_parts.append("\n=== INTERACTIVE BUTTONS ===\n" + "\n".join(interactive_buttons))
 
         if submission_buttons:
-            context_parts.append("\nSubmission buttons (for final actions):" + "\n" + "\n".join(submission_buttons))
+            context_parts.append("\n=== SUBMISSION BUTTONS ===\n" + "\n".join(submission_buttons))
         
         page_context = "\n".join(context_parts)
         

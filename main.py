@@ -23,7 +23,7 @@ async def run_automation(goal: str, config: Optional[Dict[str, Any]] = None):
     
     # Set up MCP client with headless mode and better browser management
     server_params = StdioServerParameters(
-        command="/Users/arhan/.nvm/versions/node/v22.18.0/bin/npx",
+        command="/opt/homebrew/bin/npx",
         args=["-y", "@playwright/mcp@latest", "--isolated"],
     )
     
@@ -81,6 +81,7 @@ async def run_automation(goal: str, config: Optional[Dict[str, Any]] = None):
             # Return final messages for analysis
             return messages
 
+    await session.close()
 
 async def main():
     """CLI entry point."""
@@ -96,7 +97,7 @@ async def main():
    
     # Default goal if none provided
     goal = "".join(args.goal) if args.goal else (
-        "Navigate to https://job.10xscale.ai/4846461985313787904 , get all the job query form fields and fill them with dummy data and submit the form. "
+        "Navigate to  file:///Users/dineshk/Downloads/text-only-job-application.html , get all the job query form fields and fill them with dummy data and submit the form. "
     )
 
     config = {

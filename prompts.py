@@ -42,6 +42,13 @@ check the deetails of each tool before using them
 
 Current progress: Step {step_count}
 
+Instructions:
+- Fill ALL the above fields in one step using dummy but realistic data.
+- If there is a file upload field, upload the file at once.
+- At the end, click the appropriate submission button (e.g., 'Submit', 'Apply', 'Finish').
+- Do not repeat filling once completed.
+
+
 ### GUIDELINES:
 1. **Navigate and Identify**: Your primary job is to navigate to the correct pages, identify key elements, and take snapshots.
 2. **Click and Snapshot**: When you find a key element like an "Apply" button, `click` it and then immediately use `browser_snapshot` to see the result.
@@ -56,8 +63,9 @@ Current progress: Step {step_count}
 6. If an action fails (e.g., a selector doesn’t work), try an alternative such as scrolling, trying a different selector, or re-extracting elements.
 7. NEVER hallucinate or invent elements that are not visible in the snapshot or extracted nodes.
 8. Combine tool calls whenever possible (e.g., snapshot + extract_text, or click + snapshot).
-9. When the job application is successfully submitted, clearly state:  
-   **" Task complete: Job application submitted."**
+9. After filling the form, stop and ask user to review the form for any missing fields.
+10. Donot submit the form after filling it . After filling the form tell user "Form filled, ready to submit. Please review and submit the form."
+11. If some fields are not filled due to lack of information , mention them clearly in the final message to user and ask user to fill them manually.
 
 I'll help you accomplish your web automation goal step by step.
 """
@@ -68,7 +76,7 @@ FILLER_PROMPT_TEMPLATE = """You are a form-filling specialist. Your task is to f
 ## Available Tools:
 - browser_type: Fill text fields and textareas
 - browser_select_option: Handle dropdowns
-- browser_file_upload: Upload files (use "/Users/arhan/Desktop/clean-connection 2/sample.pdf")
+- browser_file_upload: Upload files (use "/Users/dineshk/Downloads/generated.pdf")
 - browser_click: Click buttons or interact with other elements
 
 ## Form Filling Guidelines:
@@ -82,16 +90,21 @@ FILLER_PROMPT_TEMPLATE = """You are a form-filling specialist. Your task is to f
    - Required fields (marked with *): Must be filled
    - Address fields: Use "123 Main St, City, State 12345"
    - Work link/Portfolio: Use "https://example.com"
+   - Answer Yes/No questions appropriately based on context
+   - Dropdowns: Firstly click on it and then Select most appropriate option from the dropdown using browser_select_option
+   
 3. **Special Cases**:
-   - File uploads: For file input fields, use browser_upload_file with the path "/Users/arhan/Desktop/clean-connection 2/sample.pdf"
-   -File path = "/Users/arhan/Desktop/clean-connection 2/sample.pdf"
-   - Dropdowns: Select first or most appropriate option using browser_select_option
+   - File uploads: For file input fields, use browser_upload_file with the path "/Users/dineshk/Downloads/generated.pdf"
+   -File path = "/Users/dineshk/Downloads/generated.pdf"
+   - Check for interactive buttons and click on them to reveal hidden input fields if any.
+
+   HANDLE DIFFERENT FORM ELEMENTS:
+   - Dropdowns: Firstly click on it and then Select most appropriate option from the dropdown using browser_select_option
    - Checkboxes: Use browser_click to toggle checkboxes
    - Radio buttons: Use browser_click to select radio buttons
    - Dynamic buttons: some buttons on browser_click opens a hidden input field , use browser_click to open it and fill the input field.
 4. After filling  , take a browser_snapshot and check the direct snapshot # if all form fields necessary are filled . If so click the submit button . If the form is successfully submitted, clearly state:  **" Task complete: Job application submitted. STOP"**
-5. If submittion fails , click_snaphot , analyse direct snapshot to check what is missed and fill accordingly . Go back to step 4 if filled .
-
+5. Never submit the form, after filling the form tell user "Form filled, ready to submit. Please review and submit the form."
 
 ## Current Form Context:
 {page_context}

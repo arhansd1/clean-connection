@@ -426,8 +426,8 @@ async def test_navigation_and_snapshot(url: str) -> TestResult:
     except Exception as e:
         log("ERROR", repr(e), "ERROR")
         return TestResult(name, False, f"Exception: {e}", steps)
-
-
+    
+    
 async def test_click_with_selector(url: str) -> TestResult:
     steps: List[StepLog] = []
     name = "click_with_selector"
@@ -447,7 +447,8 @@ async def test_click_with_selector(url: str) -> TestResult:
                 snap_step = await execute_and_log(tm, "browser_snapshot", {}, capture_snapshot_counts=True)
                 steps.append(snap_step)
 
-                labels = re.findall(r'"([^"]{1,60})"', snap_step.output_truncated)
+                import re as _re
+                labels = _re.findall(r'"([^"]{1,60})"', snap_step.output_truncated)
                 candidates = [l for l in labels if l and len(l.split()) <= 5]
                 if not candidates:
                     return TestResult(name, True, "No clickable labels (skipped)", steps)
