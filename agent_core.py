@@ -11,7 +11,7 @@ from langgraph.graph import START
 from langgraph.graph import MessagesState
 
 from tool_manager import ToolManager
-from utils import extract_interactive_elements, truncate_text , find_element_ref , analyze_goal , extract_form_fields , _is_interactive_line
+from utils import extract_interactive_elements, truncate_text, find_element_ref, analyze_goal, extract_form_fields, _is_interactive_line, parse_form_fields_enhanced
 from prompts import SYSTEM_PROMPT_TEMPLATE, FILLER_PROMPT_TEMPLATE
 
 import base64
@@ -324,53 +324,150 @@ class WebAgent:
         return "executor"
 
     def filler_node(self, state: MessagesState):
-        """Specialized node for filling forms."""
+        """Specialized node for filling forms with enhanced field handling."""
         messages = state["messages"]
         
         # Create a form context with all the form fields, buttons, and their references
         form_fields = []
         interactive_buttons = []
         submission_buttons = []
+        dropdowns = []
+        radio_groups = []
+        checkboxes = []
         
         if self.state.page_state:
-            # Add input fields
-            inputs = self.state.page_state.get("inputs", [])
+            # Get all element references
             refs = self.state.page_state.get("refs", {})
             
             # Track which refs we've already added to avoid duplicates
             added_refs = set()
             
-            # Add input fields
+            # 1. Process regular input fields
+            inputs = self.state.page_state.get("inputs", [])
             for input_field in inputs:
                 ref = refs.get(input_field, [''])[0]
                 if ref and ref not in added_refs:
-                    form_fields.append(f"- {input_field} (ref: {ref})")
+                    # Format field with clean structure
+                    field_lower = input_field.lower()
+                    field_type = "text"
+                    
+                    if any(kw in field_lower for kw in ["email", "e-mail"]):
+                        field_type = "email"
+                    elif any(kw in field_lower for kw in ["phone", "mobile", "telephone"]):
+                        field_type = "phone"
+                        
+                    form_fields.append(f"- Text field, {input_field}, ref:{ref}, type:{field_type}")
+                    added_refs.add(ref)
+            
+            # 2. Process dropdowns/selects
+            dropdowns_list = self.state.page_state.get("comboboxes", [])
+            for dropdown in dropdowns_list:
+                ref = refs.get(dropdown, [''])[0]
+                if ref and ref not in added_refs:
+                    dropdowns.append(f"- Dropdown, {dropdown}, ref:{ref}")
+                    added_refs.add(ref)
+            
+            # 3. Process radio groups and radio buttons
+            radio_groups_list = self.state.page_state.get("radio_groups", [])
+            for radio in radio_groups_list:
+                ref = refs.get(radio, [''])[0]
+                if ref and ref not in added_refs:
+                    radio_groups.append(f"- Radio group, {radio}, ref:{ref}")
+                    # Add individual radio buttons within the group
+                    radio_refs = refs.get(radio, [])
+                    for i, r in enumerate(radio_refs[1:], 1):
+                        radio_groups.append(f"  - Radio option, {radio} {i}, ref:{r}")
+                    added_refs.add(ref)
+            
+            # 4. Process checkboxes
+            checkboxes_list = self.state.page_state.get("checkboxes", [])
+            for checkbox in checkboxes_list:
+                ref = refs.get(checkbox, [''])[0]
+                if ref and ref not in added_refs:
+                    checkboxes.append(f"- Checkbox, {checkbox}, ref:{checkbox}, checked:false")
                     added_refs.add(ref)
 
-            # Add and categorize buttons
+            # 5. Categorize buttons
             buttons_list = self.state.page_state.get("buttons", [])
-            submission_keywords = ["submit", "clear", "cancel", "next", "apply", "finish", "send"]
+            submission_keywords = ["submit", "next", "continue", "apply", "finish"]
+            interactive_keywords = ["add", "more", "upload", "browse", "choose", "select"]
+            
             for button in buttons_list:
                 ref = refs.get(button, [''])[0]
                 if ref and ref not in added_refs:
                     button_lower = button.lower()
                     if any(keyword in button_lower for keyword in submission_keywords):
-                        submission_buttons.append(f"- '{button}' button (ref: {ref})")
+                        submission_buttons.append(f"- Submit button, '{button}', ref:{ref}")
+                    elif any(keyword in button_lower for keyword in interactive_keywords):
+                        interactive_buttons.append(f"- Action button, '{button}', ref:{ref}")
                     else:
-                        interactive_buttons.append(f"- '{button}' button (ref: {ref})")
+                        interactive_buttons.append(f"- Button, '{button}', ref:{ref}")
                     added_refs.add(ref)
         
-        # Build the full context
-        context_parts = [f"Current page: {self.state.current_url}"]
+        # Combine all fillable fields in the order they appear on the page
+        all_fillable = []
         
-        if form_fields:
-            context_parts.append("\nForm fields available:" + "\n" + "\n".join(form_fields))
+        # Get all elements with their order from the page state
+        if self.state.page_state and "snapshot_text" in self.state.page_state:
+            snapshot_lines = self.state.page_state["snapshot_text"].splitlines()
+            
+            # Track which elements we've already added
+            added_elements = set()
+            
+            # Process each line to maintain original order
+            for line in snapshot_lines:
+                # Check for text fields
+                for field in form_fields:
+                    if field.split(',', 1)[1].strip().split(',')[0].strip() in line and field not in added_elements:
+                        all_fillable.append(field)
+                        added_elements.add(field)
+                        break
+                
+                # Check for dropdowns
+                for dropdown in dropdowns:
+                    if dropdown.split(',', 1)[1].strip().split(',')[0].strip() in line and dropdown not in added_elements:
+                        all_fillable.append(dropdown)
+                        added_elements.add(dropdown)
+                        break
+                        
+                # Check for radio groups
+                for radio in radio_groups:
+                    if radio.split(',', 1)[1].strip().split(',')[0].strip() in line and radio not in added_elements:
+                        all_fillable.append(radio)
+                        added_elements.add(radio)
+                        break
+                        
+                # Check for checkboxes
+                for checkbox in checkboxes:
+                    if checkbox.split(',', 1)[1].strip().split(',')[0].strip() in line and checkbox not in added_elements:
+                        all_fillable.append(checkbox)
+                        added_elements.add(checkbox)
+                        break
+                        
+                # Check for interactive buttons that might reveal form fields
+                for button in interactive_buttons:
+                    if button.split(',', 1)[1].strip().split(',')[0].strip() in line and button not in added_elements:
+                        all_fillable.append(button)
+                        added_elements.add(button)
+                        break
         
-        if interactive_buttons:
-            context_parts.append("\nInteractive buttons (for revealing fields):" + "\n" + "\n".join(interactive_buttons))
-
+        # If we couldn't determine order from snapshot, just combine all lists
+        if not all_fillable:
+            all_fillable = form_fields + dropdowns + radio_groups + checkboxes + interactive_buttons
+        
+        # Use the enhanced form field parser to get clean output
+        form_field_text = "\n".join(all_fillable)
+        clean_formatted_fields = parse_form_fields_enhanced(form_field_text)
+        
+        # Build the context parts
+        context_parts = [
+            f"=== CURRENT PAGE ===\n{self.state.current_url}",
+            f"\n=== FILL_FIELDS ===\n{clean_formatted_fields}"
+        ]
+        
+        # Add non-fillable buttons separately
         if submission_buttons:
-            context_parts.append("\nSubmission buttons (for final actions):" + "\n" + "\n".join(submission_buttons))
+            context_parts.append("\n=== SUBMISSION BUTTONS ===\n" + "\n".join(submission_buttons))
         
         page_context = "\n".join(context_parts)
         

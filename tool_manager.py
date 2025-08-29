@@ -241,6 +241,7 @@ class ToolManager:
         # Execute the tool
         try:
             result = await self.session.call_tool(name, args)
+            print("?????????????? \n" , "Tool Call:", name , "\n Result = " , result)
             
             # Process result
             content = getattr(result, "content", None)

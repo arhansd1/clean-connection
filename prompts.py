@@ -45,7 +45,7 @@ Current progress: Step {step_count}
 ### GUIDELINES:
 1. **Navigate and Identify**: Your primary job is to navigate to the correct pages, identify key elements, and take snapshots.
 2. **Click and Snapshot**: When you find a key element like an "Apply" button, `click` it and then immediately use `browser_snapshot` to see the result.
-3. **Form Detection**: After each snapshot, if you detect a form (indicated by multiple input fields, textareas, or select elements), the system will route to a form-filling specialist. Indicators of a form include:
+3. **Form Detection**: After each snapshot, if you detect a form (indicated by multiple input fields, textareas, or any elements with kind of inputs), the system will route to a form-filling specialist. Indicators of a form include:
    - Multiple input fields
    - Required fields (marked with * or "required")
    - Submit/Continue buttons along with input fields
@@ -70,10 +70,12 @@ FILLER_PROMPT_TEMPLATE = """You are a form-filling specialist. Your task is to f
 - browser_select_option: Handle dropdowns
 - browser_file_upload: Upload files (use "/Users/arhan/Desktop/clean-connection 2/sample.pdf")
 - browser_click: Click buttons or interact with other elements
+- browser_select_option: Select an option in a dropdown | Parameters: element:string*, ref:string*, values:array*
+- browser_tab_select: Select a tab by index | Parameters: index:number*
 
 ## Form Filling Guidelines:
 1. **Use Provided References**: Each form field has a reference (ref) that must be used with the tools.
-2. **Form might contain inputs , button , dropdown , checkboxes , radio buttons , file upload etc.** . You need to fill them appropriately based on the label and datatype .
+2. **Form might contain inputs , button , dropdown , checkboxes , radio buttons , yes or no options , file upload etc.** . You need to fill them appropriately based on the label and datatype .
 2.** browser_click or browser_select_option on all the Interactive buttons to check for any hidden input popups as a part of form filling.
 3. **Field Types**:
    - Text fields: Use realistic dummy data (e.g., "John" for first name)
@@ -82,10 +84,11 @@ FILLER_PROMPT_TEMPLATE = """You are a form-filling specialist. Your task is to f
    - Required fields (marked with *): Must be filled
    - Address fields: Use "123 Main St, City, State 12345"
    - Work link/Portfolio: Use "https://example.com"
+   ** Fill appropriate dummy data for any fields not mentioned
 3. **Special Cases**:
    - File uploads: For file input fields, use browser_upload_file with the path "/Users/arhan/Desktop/clean-connection 2/sample.pdf"
    -File path = "/Users/arhan/Desktop/clean-connection 2/sample.pdf"
-   - Dropdowns: Select first or most appropriate option using browser_select_option
+   - Dropdowns: Select most appropriate option using browser_select_option
    - Checkboxes: Use browser_click to toggle checkboxes
    - Radio buttons: Use browser_click to select radio buttons
    - Dynamic buttons: some buttons on browser_click opens a hidden input field , use browser_click to open it and fill the input field.
@@ -98,3 +101,4 @@ FILLER_PROMPT_TEMPLATE = """You are a form-filling specialist. Your task is to f
 
 Analyze the form fields above and generate appropriate tool calls to fill them out. Process all fields in one go, then plan to submit the form.
 """
+

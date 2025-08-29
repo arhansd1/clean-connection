@@ -1,6 +1,260 @@
-"""Utility functions for web automation agent."""
+"""Enhanced utility functions for web automation agent."""
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+from dataclasses import dataclass
+
+# ---------------- Enhanced Form Field Parser ---------------- #
+
+@dataclass
+class FormField:
+    """Structured form field representation."""
+    element_type: str
+    label: str
+    text: str
+    ref: str
+    field_type: Optional[str] = None
+    options: Optional[List[str]] = None
+    required: bool = False
+    
+    def __str__(self):
+        """Clean string representation."""
+        base = f"{self.element_type.title()} field {{Label: '{self.label}'"
+        if self.text and self.text != self.label:
+            base += f", Text: '{self.text}'"
+        if self.field_type:
+            base += f", Type: '{self.field_type}'"
+        if self.ref:
+            base += f", Ref: '{self.ref}'"
+        if self.options:
+            base += f", Options: {self.options}"
+        if self.required:
+            base += ", Required: True"
+        base += "}"
+        return base
+
+
+class FormFieldParser:
+    """Enhanced form field parser with comprehensive error handling."""
+    
+    def __init__(self):
+        self.ref_pattern = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")
+        self.quoted_pattern = re.compile(r'"([^"]+)"')
+        
+        # Field type mappings
+        self.element_type_mapping = {
+            "textbox": "text",
+            "input": "text",
+            "textarea": "textarea", 
+            "combobox": "dropdown",
+            "select": "dropdown",
+            "checkbox": "checkbox",
+            "radio": "radio",
+            "radiogroup": "radio_group",
+            "spinbutton": "number",
+            "button": "button",
+            "link": "link",
+            "tab": "tab"
+        }
+        
+        # Enhanced field type detection patterns
+        self.field_type_patterns = {
+            "email": ["email", "@", "e-mail"],
+            "phone": ["phone", "tel", "mobile", "telephone"],
+            "date": ["date", "calendar", "choose date"],
+            "file": ["upload", "file", "cv", "resume", "browse files"],
+            "password": ["password", "pass"],
+            "number": ["number", "amount", "pay", "salary"],
+            "url": ["url", "website", "link"],
+            "search": ["search"]
+        }
+    
+    def safe_get_list_item(self, items: List[str], index: int, default: str = "") -> str:
+        """Safely get list item with bounds checking."""
+        try:
+            return items[index] if 0 <= index < len(items) else default
+        except (IndexError, TypeError):
+            return default
+    
+    def safe_split(self, text: str, delimiter: str, expected_parts: int) -> List[str]:
+        """Safely split text and pad with empty strings if needed."""
+        try:
+            parts = text.split(delimiter, expected_parts - 1)
+            # Pad with empty strings if we don't have enough parts
+            while len(parts) < expected_parts:
+                parts.append("")
+            return parts
+        except (AttributeError, TypeError):
+            return [""] * expected_parts
+    
+    def extract_field_info(self, field_line: str) -> Tuple[str, str, str, str]:
+        """Extract field information with robust error handling."""
+        try:
+            # Remove leading dash and whitespace
+            cleaned_line = field_line.strip().lstrip('- ')
+            
+            # Split on the first comma to separate element type from rest
+            parts = self.safe_split(cleaned_line, ',', 2)
+            element_type = self.safe_get_list_item(parts, 0).strip()
+            remainder = self.safe_get_list_item(parts, 1).strip()
+            
+            # Extract label (everything before the ref)
+            if 'ref:' in remainder:
+                label_part, ref_part = remainder.rsplit('ref:', 1)
+                label = label_part.strip().rstrip(',').strip()
+                ref = ref_part.split(',')[0].strip()  # Get ref, ignore anything after comma
+            else:
+                label = remainder
+                ref = ""
+            
+            # Extract field type if present (type:xxx pattern)
+            field_type = ""
+            type_match = re.search(r'type:(\w+)', field_line)
+            if type_match:
+                field_type = type_match.group(1)
+            
+            return element_type, label, ref, field_type
+            
+        except Exception as e:
+            # Return safe defaults if parsing fails
+            return "unknown", field_line.strip(), "", ""
+    
+    def detect_field_type(self, label: str, element_type: str, existing_type: str = "") -> str:
+        """Detect field type based on label content and element type."""
+        if existing_type:
+            return existing_type
+            
+        label_lower = label.lower()
+        
+        # Check against field type patterns
+        for field_type, patterns in self.field_type_patterns.items():
+            if any(pattern in label_lower for pattern in patterns):
+                return field_type
+        
+        # Default based on element type
+        return self.element_type_mapping.get(element_type.lower(), "text")
+    
+    def extract_radio_options(self, field_lines: List[str], start_index: int) -> Tuple[List[str], int]:
+        """Extract radio button options that follow a radio group."""
+        options = []
+        current_index = start_index + 1
+        
+        try:
+            while current_index < len(field_lines):
+                line = field_lines[current_index].strip()
+                if not line.startswith('- Radio group,'):
+                    break
+                    
+                # Extract option label
+                element_type, label, ref, field_type = self.extract_field_info(line)
+                if label:
+                    options.append(label)
+                current_index += 1
+                
+        except (IndexError, AttributeError):
+            pass
+            
+        return options, current_index - 1
+    
+    def parse_form_fields(self, form_field_text: str) -> List[FormField]:
+        """Parse form fields from the structured text format."""
+        if not form_field_text or not isinstance(form_field_text, str):
+            return []
+            
+        lines = [line.strip() for line in form_field_text.strip().split('\n') if line.strip()]
+        fields = []
+        i = 0
+        
+        while i < len(lines):
+            try:
+                line = lines[i]
+                
+                # Skip empty lines or lines that don't look like field definitions
+                if not line or not line.startswith('-'):
+                    i += 1
+                    continue
+                
+                # Extract basic field information
+                element_type, label, ref, field_type = self.extract_field_info(line)
+                
+                if not element_type or not label:
+                    i += 1
+                    continue
+                
+                # Detect actual field type
+                detected_type = self.detect_field_type(label, element_type, field_type)
+                
+                # Check if field is required (has asterisk)
+                required = '*' in line or 'required' in line.lower()
+                
+                # Handle radio groups specially
+                options = None
+                if 'radio group' in element_type.lower():
+                    # Look ahead for radio options
+                    radio_options, last_option_index = self.extract_radio_options(lines, i)
+                    if radio_options:
+                        options = radio_options
+                        i = last_option_index  # Skip the option lines
+                
+                # Extract any inline text that might be different from label
+                text = label  # Default to label
+                
+                # Look for patterns like "Email example@example.com"
+                if ' ' in label and not label.endswith('?'):
+                    # Check if this might be label + placeholder text
+                    words = label.split()
+                    if len(words) >= 2:
+                        # Common patterns: "Email example@example.com", "Date Date"
+                        first_word = words[0]
+                        rest = ' '.join(words[1:])
+                        
+                        # If the rest looks like placeholder text
+                        if ('@' in rest or 
+                            rest.lower() in ['date', 'example', 'placeholder'] or
+                            rest == first_word):  # Repeated word pattern
+                            text = rest
+                            label = first_word
+                
+                # Create form field
+                field = FormField(
+                    element_type=element_type.lower().replace(' ', '_'),
+                    label=label,
+                    text=text,
+                    ref=ref,
+                    field_type=detected_type,
+                    options=options,
+                    required=required
+                )
+                
+                fields.append(field)
+                i += 1
+                
+            except Exception as e:
+                # Log error but continue processing
+                print(f"Error processing field line {i}: {e}")
+                i += 1
+                continue
+        
+        return fields
+    
+    def format_clean_output(self, fields: List[FormField]) -> str:
+        """Format fields in the requested clean format."""
+        if not fields:
+            return "No form fields found."
+            
+        output_lines = []
+        for field in fields:
+            output_lines.append(str(field))
+        
+        return '\n'.join(output_lines)
+
+
+# Global parser instance for easy access
+_form_parser = FormFieldParser()
+
+def parse_form_fields_enhanced(form_field_text: str) -> str:
+    """Enhanced form field parsing with clean output format."""
+    fields = _form_parser.parse_form_fields(form_field_text)
+    return _form_parser.format_clean_output(fields)
 
 # ---------------- Core Utilities ---------------- #
 
@@ -10,14 +264,14 @@ def truncate_text(text: str, limit: int = 1000) -> str:
     return text[:limit] + f"... [truncated {len(text) - limit} characters]"
 
 
-INTERACTIVE_KEYWORDS = ("textbox", "input", "combobox", "textarea", "checkbox", "radio", "select", "button")
+INTERACTIVE_KEYWORDS = ("textbox", "input", "combobox", "textarea", "checkbox", "dropdown", "radio", "select", "button", "radiogroup")
 
 def _is_interactive_line(line_lower: str) -> bool:
     return any(k in line_lower for k in INTERACTIVE_KEYWORDS)
 
 
 def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
-    print("\nSNAPSHOT TEXT", snapshot_text ,"\n")
+    print("\nSNAPSHOT TEXT", snapshot_text, "\n")
     lines = snapshot_text.splitlines()
     result = {
         "title": None,
@@ -27,174 +281,244 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
         "links": [],
         "tabs": [],
         "refs": {},
+        "dropdowns":[],
         "interactives": [],
-        "all_clickables": []
+        "all_clickables": [],
+        "form_sections": [],
+        "file_uploads": [],
+        "radio_groups": [],
+        "comboboxes": [],
+        "date_fields": []
     }
     
-    ref_pattern = re.compile(r"\[ref=(e\d+)\]")
-    quoted_pattern = re.compile(r'"(.+?)"')
+    ref_pattern = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")  # Updated to handle iframe refs like f1e2
+    quoted_pattern = re.compile(r'"([^"]+)"')
     icon_pattern = re.compile(r'<svg[^>]*>.*?</svg>|<i[^>]*>.*?</i>|<img[^>]*>', re.DOTALL)
     
-    # First pass: collect context information
-    context_map = {}  # ref -> nearby text context
+    # Enhanced context mapping - collect more comprehensive context
+    context_map = {}
+    section_context = ""  # Track current section/heading
     
     for i, line in enumerate(lines):
         line_lower = line.lower()
+        line_stripped = line.strip()
+        
+        # Track section headings for context
+        if "heading" in line_lower:
+            heading_match = quoted_pattern.search(line)
+            if heading_match:
+                section_context = heading_match.group(1)
+                result["headings"].append(section_context)
+        
         refs = ref_pattern.findall(line)
         
         if refs:
             for ref in refs:
-                # Collect context from current and nearby lines
+                # Collect more comprehensive context
                 context_lines = []
                 
-                # Look backwards for context (up to 3 lines)
-                for j in range(max(0, i-3), i):
+                # Add current section context
+                if section_context:
+                    context_lines.append(f"Section: {section_context}")
+                
+                # Look backwards for context (up to 5 lines)
+                for j in range(max(0, i-5), i):
                     prev_line = lines[j].strip()
                     if prev_line and not ref_pattern.search(prev_line):
-                        # Extract meaningful text (not just structural elements)
-                        text_content = re.sub(r'^\s*-\s*', '', prev_line)  # Remove list markers
-                        text_content = re.sub(r':\s*$', '', text_content)  # Remove trailing colons
-                        if len(text_content) > 1 and not text_content.lower() in ['generic', 'text']:
+                        # Extract meaningful text
+                        text_content = re.sub(r'^\s*-\s*', '', prev_line)
+                        text_content = re.sub(r':\s*$', '', text_content)
+                        text_content = re.sub(r'^\s*generic.*?:\s*', '', text_content)
+                        
+                        # Skip very generic content
+                        skip_terms = ['generic', 'text:', 'img', 'button:', 'textbox:', 'link:']
+                        if (len(text_content) > 2 and 
+                            not any(term in text_content.lower() for term in skip_terms) and
+                            not text_content.startswith('- ') and
+                            text_content not in context_lines):
                             context_lines.append(text_content)
                 
-                # Look forwards for context (up to 2 lines)
-                for j in range(i+1, min(len(lines), i+3)):
+                # Look forwards for context (up to 3 lines)
+                for j in range(i+1, min(len(lines), i+4)):
                     next_line = lines[j].strip()
                     if next_line and not ref_pattern.search(next_line):
                         text_content = re.sub(r'^\s*-\s*', '', next_line)
                         text_content = re.sub(r':\s*$', '', text_content)
-                        if len(text_content) > 1 and not text_content.lower() in ['generic', 'text']:
+                        text_content = re.sub(r'^\s*generic.*?:\s*', '', text_content)
+                        
+                        skip_terms = ['generic', 'text:', 'img', 'button:', 'textbox:', 'link:']
+                        if (len(text_content) > 2 and 
+                            not any(term in text_content.lower() for term in skip_terms) and
+                            not text_content.startswith('- ') and
+                            text_content not in context_lines):
                             context_lines.append(text_content)
                 
                 context_map[ref] = context_lines
     
+    # Enhanced element extraction
+    file_keywords = ["upload", "file", "resume", "cv", "document", "pdf", "browse files", "drag and drop"]
+    date_keywords = ["date", "calendar", "choose date"]
     
-    file_keywords = ["upload", "file", "resume", "cv", "document", "pdf"]
-    for line in lines:
+    for i, line in enumerate(lines):
         line_lower = line.lower()
+        line_stripped = line.strip()
         
         # Extract title
         if result["title"] is None and "page title:" in line_lower:
             result["title"] = line.split(":", 1)[-1].strip()
             continue
         
-        # Check if this is a button element
-        is_button = 'button ' in f" {line_lower} "
+        # Handle special cases - comboboxes without quotes
+        if "combobox" in line_lower and not quoted_pattern.search(line):
+            refs = ref_pattern.findall(line)
+            if refs:
+                # Look for context in previous lines for combobox labels
+                context_lines = context_map.get(refs[0], [])
+                for context in context_lines:
+                    if len(context) > 5 and not any(skip in context.lower() for skip in ['generic', 'text:', 'section:']):
+                        result["comboboxes"].append(context.strip())
+                        result["interactives"].append(f"combobox: {context.strip()}")
+                        if context.strip() not in result["refs"]:
+                            result["refs"][context.strip()] = refs
+                        break
         
-        # Extract all interactive elements with better pattern matching
-        interactive_keywords = [
-            "button", "link", "tab", "textbox", "input", "combobox", 
-            "textarea", "checkbox", "radio", "select", "clickable", "interactive"
-        ]
+        # Enhanced interactive element detection - handle all element types from snapshot
+        interactive_types = {
+            "button": ["button"],
+            "textbox": ["textbox", "input"],
+            "combobox": ["combobox", "select"],
+            "textarea": ["textarea"],
+            "checkbox": ["checkbox"],
+            "radio": ["radio"],
+            "radiogroup": ["radiogroup"],
+            "link": ["link"],
+            "tab": ["tab"],
+            "spinbutton": ["spinbutton"],
+            "group": ["group"],
+            "option": ["option"],  # Handle dropdown options
+            "list": ["list"],      # Handle file upload lists
+            "img": ["img"]         # Handle clickable images/icons
+        }
         
-        # Check if this line contains any interactive element
-        is_button = 'button' in line_lower
-        is_interactive = any(f' {kw} ' in f' {line_lower} ' for kw in interactive_keywords)
+        detected_type = None
+        for element_type, keywords in interactive_types.items():
+            if any(f' {kw} ' in f' {line_lower} ' for kw in keywords):
+                detected_type = element_type
+                break
         
-        if is_interactive or is_button:
-            # Extract all quoted text (potential labels)
+        if detected_type:
+            # Extract labels from quotes
             labels = quoted_pattern.findall(line)
-            
-            # Extract reference
             refs = ref_pattern.findall(line)
             
-            # If no labels found, try to generate meaningful labels
+            # Enhanced label extraction for elements without quoted labels
             if not labels and refs:
-                ref = refs[0]  # Use first ref
-                
-                # Try to get label from context
+                ref = refs[0]
                 context_lines = context_map.get(ref, [])
+                
+                # Try different label extraction strategies
                 potential_labels = []
                 
+                # Strategy 1: Extract from current line patterns
+                if "Browse Files" in line:
+                    potential_labels.append("Browse Files")
+                elif "Add Row" in line:
+                    potential_labels.append("Add Row")
+                elif "Choose Date" in line:
+                    potential_labels.append("Choose Date")
+                elif "Submit" in line:
+                    potential_labels.append("Submit")
+                elif "Clear" in line:
+                    potential_labels.append("Clear")
+                
+                # Strategy 2: Use context lines
                 for context in context_lines:
-                    # Clean up context text - remove special markers and trim
-                    clean_context = re.sub(r'^text:\s*', '', context)  # Remove 'text:' prefix if present
+                    clean_context = re.sub(r'^(Section:|text:\s*)', '', context).strip()
                     clean_context = re.sub(r'[*"]+', '', clean_context).strip()
                     
-                    # Skip very short or generic text
-                    if len(clean_context) > 2 and clean_context.lower() not in ['generic', 'text', 'img']:
+                    if (len(clean_context) > 1 and 
+                        clean_context.lower() not in ['generic', 'text', 'img', 'please select'] and
+                        not clean_context.startswith('- ')):
                         potential_labels.append(clean_context)
                 
-                # Use the most relevant context as label
+                # Strategy 3: Extract from element attributes
+                if not potential_labels:
+                    # Look for meaningful text in the line itself
+                    text_parts = line.split()
+                    for part in text_parts:
+                        if (len(part) > 2 and 
+                            part not in ['generic', 'ref', 'cursor'] and
+                            not part.startswith('[') and 
+                            not part.endswith(']')):
+                            potential_labels.append(part)
+                
+                # Select best label
                 if potential_labels:
-                    # Prioritize labels that seem more descriptive
-                    best_label = None
+                    # Prioritize certain types of labels
+                    best_label = potential_labels[0]
                     for label in potential_labels:
                         label_lower = label.lower()
-                        # Prefer labels with common form field terms
-                        if any(term in label_lower for term in ['upload', 'resume', 'cv', 'file', 'portfolio', 'work', 'link']):
+                        # Prefer descriptive labels
+                        if any(term in label_lower for term in ['upload', 'file', 'browse', 'submit', 'date', 'name', 'email', 'address']):
                             best_label = label
                             break
-                        # Or use the first non-generic one
-                        elif not best_label and len(label) > 3:
-                            best_label = label
-                    
-                    if best_label:
-                        labels = [best_label]
-                
-                # If still no labels but it's a button, try to infer from element type
-                if not labels and is_button:
-                    if icon_pattern.search(line):
-                        # Try to get label from nearby text or context
-                        if context_lines:
-                            # Look for descriptive text in context
-                            for context in context_lines:
-                                if any(term in context.lower() for term in ['upload', 'file', 'choose', 'portfolio', 'work']):
-                                    labels = [context.strip().replace('"', '')]
-                                    break
-                        
-                        if not labels:
-                            labels = ["icon_button"]
-                    elif 'plus' in line_lower or 'add' in line_lower:
-                        labels = ["add_button"]
-                    elif '>' in line and '<' in line:
-                        # Extract text between > and <
-                        text_match = re.search(r'>([^<]+)<', line)
-                        if text_match and text_match.group(1).strip():
-                            labels = [text_match.group(1).strip()]
-                        else:
-                            labels = ["button"]
-                    else:
-                        labels = ["button"]
+                    labels = [best_label]
             
-            # Classify the element type
-            element_type = "unknown"
-            if is_button or 'button' in line_lower:
-                element_type = "button"
-            elif "tab" in line_lower:
-                element_type = "tab"
-            elif any(kw in line_lower for kw in ["textbox", "input", "combobox", "textarea"]):
-                element_type = "input"
-            elif "link" in line_lower:
-                element_type = "link"
-            elif any(kw in line_lower for kw in ["checkbox", "radio", "select"]):
-                element_type = "input"
-            
-            # Add to appropriate category
+            # Process each label
             for label in labels:
                 if label:
-                    # Clean up the label
                     label = label.strip().replace('"', '')
-                    if not label:
+                    if not label or label.lower() in ['generic', 'text']:
                         continue
-                        
-                    # Add to specific category
-                    if element_type == "button" and label not in result["buttons"]:
-                        result["buttons"].append(label)
-                    elif element_type == "tab" and label not in result["tabs"]:
-                        result["tabs"].append(label)
-                    elif element_type == "input" and label not in result["inputs"]:
-                        result["inputs"].append(label)
-                    elif element_type == "link" and label not in result["links"]:
-                        result["links"].append(label)
                     
-                    # Add to general interactives
-                    interactive_desc = f"{element_type}: {label}"
+                    # Add to appropriate categories
+                    element_info = {
+                        "label": label,
+                        "type": detected_type,
+                        "ref": refs[0] if refs else None,
+                        "line": line_stripped
+                    }
+                    
+                    # Add to appropriate categories with enhanced detection
+                    if detected_type in ["button"] and label not in result["buttons"]:
+                        result["buttons"].append(label)
+                    elif detected_type in ["textbox", "input", "textarea", "spinbutton"] and label not in result["inputs"]:
+                        result["inputs"].append(label)
+                    elif detected_type in ["combobox", "select"] and label not in result["comboboxes"]:
+                        result["comboboxes"].append(label)
+                    elif detected_type == "link" and label not in result["links"]:
+                        result["links"].append(label)
+                    elif detected_type == "tab" and label not in result["tabs"]:
+                        result["tabs"].append(label)
+                    elif detected_type in ["radiogroup", "radio", "group"] and label not in result["radio_groups"]:
+                        result["radio_groups"].append(label)
+                    elif detected_type == "checkbox":
+                        checkbox_info = f"checkbox: {label}"
+                        if checkbox_info not in result["interactives"]:
+                            result["interactives"].append(checkbox_info)
+                    elif detected_type == "list" and "uploaded files" in label.lower():
+                        list_info = f"file_list: {label}"
+                        if list_info not in result["file_uploads"]:
+                            result["file_uploads"].append(list_info)
+                    
+                    # Special handling for file uploads
+                    if any(kw in line_lower for kw in file_keywords):
+                        file_info = f"file_upload: {label}"
+                        if file_info not in result["file_uploads"]:
+                            result["file_uploads"].append(file_info)
+                    
+                    # Special handling for date fields
+                    if any(kw in line_lower for kw in date_keywords):
+                        date_info = f"date_field: {label}"
+                        if date_info not in result["date_fields"]:
+                            result["date_fields"].append(date_info)
+                    
+                    # Add to general collections
+                    interactive_desc = f"{detected_type}: {label}"
                     if interactive_desc not in result["interactives"]:
                         result["interactives"].append(interactive_desc)
                     
-                    # Add to all clickables
-                    if element_type in ["button", "tab", "link"] and label not in result["all_clickables"]:
+                    if detected_type in ["button", "tab", "link"] and label not in result["all_clickables"]:
                         result["all_clickables"].append(label)
                     
                     # Store ref associations
@@ -205,146 +529,347 @@ def extract_interactive_elements(snapshot_text: str) -> Dict[str, Any]:
                             if ref not in result["refs"][label]:
                                 result["refs"][label].append(ref)
     
-    # ---------------- Added: better file input detection ---------------- #
+    # Additional processing for iframe content and nested elements
+    iframe_count = 0
     for line in lines:
+        if "iframe" in line.lower():
+            iframe_count += 1
+            result["form_sections"].append(f"iframe_section_{iframe_count}")
+    
+    # Additional comprehensive processing for complex forms
+    # Extract dropdown/combobox options and radiogroup questions
+    for i, line in enumerate(lines):
         line_lower = line.lower()
-        if any(kw in line_lower for kw in file_keywords) and ("input" in line_lower or "button" in line_lower):
+        
+        # Handle radiogroups with skill ratings
+        if "radiogroup" in line_lower:
             labels = quoted_pattern.findall(line)
             refs = ref_pattern.findall(line)
-            
             if labels and refs:
-                label = labels[0]
-                ref = refs[0]
+                skill_name = labels[0]
+                if skill_name not in result["radio_groups"]:
+                    result["radio_groups"].append(skill_name)
+                    result["interactives"].append(f"skill_rating: {skill_name}")
+                    result["refs"][skill_name] = refs
+        
+        # Handle group elements (Yes/No questions)
+        elif "group" in line_lower:
+            labels = quoted_pattern.findall(line)
+            refs = ref_pattern.findall(line)
+            if labels and refs:
+                question = labels[0]
+                if question not in result["radio_groups"]:
+                    result["radio_groups"].append(question)
+                    result["interactives"].append(f"yes_no_question: {question}")
+                    result["refs"][question] = refs
+        
+        # Handle standalone combobox questions without direct quotes
+        elif "combobox" in line_lower and quoted_pattern.search(line):
+            labels = quoted_pattern.findall(line)
+            refs = ref_pattern.findall(line)
+            if labels and refs:
+                question = labels[0]
+                if question not in result["comboboxes"]:
+                    result["comboboxes"].append(question)
+                    result["interactives"].append(f"dropdown: {question}")
+                    result["refs"][question] = refs
+        
+        # Extract individual radio button options within groups
+        elif "radio" in line_lower and not "radiogroup" in line_lower:
+            labels = quoted_pattern.findall(line)
+            refs = ref_pattern.findall(line)
+            if labels and refs:
+                option = labels[0]
+                # Look for parent context
+                context_lines = context_map.get(refs[0], [])
+                parent_question = None
+                for context in context_lines:
+                    if "?" in context and len(context) > 10:
+                        parent_question = context.strip('?"')
+                        break
                 
-                # Add to inputs with special marker
-                result["inputs"].append(f"file:{label}")
-                if f"file:{label}" not in result["refs"]:
-                    result["refs"][f"file:{label}"] = []
-                if ref not in result["refs"][f"file:{label}"]:
-                    result["refs"][f"file:{label}"].append(ref)
-    # -------------------------------------------------------------------- #
+                option_info = f"radio_option: {option}"
+                if parent_question:
+                    option_info += f" (for: {parent_question})"
+                
+                if option_info not in result["interactives"]:
+                    result["interactives"].append(option_info)
+                    result["refs"][f"{option} (radio)"] = refs
+        
+        # Handle checkbox elements specifically
+        elif "checkbox" in line_lower:
+            labels = quoted_pattern.findall(line)
+            refs = ref_pattern.findall(line)
+            if labels and refs:
+                checkbox_label = labels[0]
+                checkbox_info = f"checkbox: {checkbox_label}"
+                if checkbox_info not in result["interactives"]:
+                    result["interactives"].append(checkbox_info)
+                    result["refs"][checkbox_label] = refs
+                    result["all_clickables"].append(checkbox_label)
+    
+    # Extract questions/labels that appear before form elements
+    question_candidates = []
+    for i, line in enumerate(lines):
+        line_stripped = line.strip()
+        # Look for question-like patterns
+        if (line_stripped.endswith('?') and 
+            len(line_stripped) > 10 and 
+            not any(kw in line_stripped.lower() for kw in INTERACTIVE_KEYWORDS)):
+            
+            # Check if next few lines contain interactive elements
+            has_following_interactive = False
+            for j in range(i+1, min(len(lines), i+5)):
+                if _is_interactive_line(lines[j].lower()):
+                    has_following_interactive = True
+                    break
+            
+            if has_following_interactive:
+                clean_question = re.sub(r'^- ', '', line_stripped)
+                clean_question = re.sub(r'generic.*?:', '', clean_question).strip()
+                if clean_question and clean_question not in question_candidates:
+                    question_candidates.append(clean_question)
+    
+    # Add question candidates to appropriate categories if not already captured
+    for question in question_candidates:
+        if not any(question in existing for existing in 
+                  result["comboboxes"] + result["radio_groups"] + result["inputs"]):
+            result["interactives"].append(f"question: {question}")
     
     return result
 
 
 def find_element_ref(snapshot_text: str, element_text: str, element_type: str = None) -> Optional[str]:
     """
-    Enhanced element finding with better pattern matching and prioritization.
+    Enhanced element finding with better pattern matching and iframe support.
     """
     lines = snapshot_text.splitlines()
     element_lower = element_text.lower()
     
     candidates = []
     
+    # Enhanced reference pattern to handle iframe refs
+    ref_pattern = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")
+    
     for idx, line in enumerate(lines):
         line_lower = line.lower()
         
-        # Skip non-interactive lines
-        if not any(kw in line_lower for kw in ["button", "link", "tab", "textbox", "input", "clickable"]):
+        # Enhanced interactive detection
+        interactive_keywords = [
+            "button", "link", "tab", "textbox", "input", "clickable", "combobox", 
+            "textarea", "checkbox", "radio", "select", "spinbutton", "radiogroup"
+        ]
+        
+        if not any(kw in line_lower for kw in interactive_keywords):
             continue
             
-        # Check for various match types with different scores
         score = 0
         
-        # Exact match (highest priority)
+        # Enhanced matching strategies
         if f'"{element_text}"' in line:
-            score = 100
-        # Contains match
+            score = 100  # Exact quoted match
         elif element_lower in line_lower:
-            score = 80
-        # Fuzzy match (word boundary)
+            score = 80   # Contains match
         elif re.search(rf'\b{re.escape(element_lower)}\b', line_lower):
-            score = 70
-        # Partial match
-        elif any(word in line_lower for word in element_lower.split()):
-            score = 50
+            score = 70   # Word boundary match
         else:
-            continue
-            
-        # Bonus for type matching
-        if element_type and element_type in line_lower:
+            # Fuzzy matching for common variations
+            element_words = element_lower.split()
+            line_words = line_lower.split()
+            common_words = set(element_words) & set(line_words)
+            if common_words and len(common_words) >= len(element_words) * 0.6:
+                score = 60
+            elif any(word in line_lower for word in element_words if len(word) > 2):
+                score = 40
+            else:
+                continue
+                
+        # Type matching bonus
+        if element_type and element_type.lower() in line_lower:
             score += 20
             
+        # Special bonuses for specific patterns
+        if "browse files" in element_lower and "browse files" in line_lower:
+            score += 30
+        if "choose date" in element_lower and "choose date" in line_lower:
+            score += 30
+        if "add row" in element_lower and "add row" in line_lower:
+            score += 30
+            
         # Extract reference
-        ref_match = re.search(r"\[ref=(e\d+)\]", line)
+        ref_match = ref_pattern.search(line)
         if ref_match:
             ref = ref_match.group(1)
-            candidates.append((score, ref, line))
+            candidates.append((score, ref, line, idx))
             
-            # Also check previous line for ref
-            if idx > 0:
-                prev_ref_match = re.search(r"\[ref=(e\d+)\]", lines[idx-1])
-                if prev_ref_match:
-                    prev_ref = prev_ref_match.group(1)
-                    candidates.append((score - 5, prev_ref, lines[idx-1]))
+            # Also check nearby lines for context
+            for offset in [-1, 1]:
+                nearby_idx = idx + offset
+                if 0 <= nearby_idx < len(lines):
+                    nearby_ref_match = ref_pattern.search(lines[nearby_idx])
+                    if nearby_ref_match:
+                        nearby_ref = nearby_ref_match.group(1)
+                        candidates.append((score - 10, nearby_ref, lines[nearby_idx], nearby_idx))
     
     if not candidates:
-        # Try alternative element names for "Apply Here"
-        if "apply here" in element_lower:
-            alternative_texts = ["apply", "submit", "continue", "next", "start application"]
-            for alt_text in alternative_texts:
-                if alt_text != element_text:
-                    alt_ref = find_element_ref(snapshot_text, alt_text, element_type)
-                    if alt_ref:
-                        return alt_ref
+        # Try alternative matching strategies
+        alternative_strategies = {
+            "apply here": ["apply", "submit", "continue", "next", "start application"],
+            "browse files": ["upload", "file", "browse", "choose file"],
+            "choose date": ["date", "calendar", "pick date"],
+            "submit": ["send", "complete", "finish", "apply"],
+        }
+        
+        for alt_pattern, alternatives in alternative_strategies.items():
+            if alt_pattern in element_lower:
+                for alt_text in alternatives:
+                    if alt_text != element_text:
+                        alt_ref = find_element_ref(snapshot_text, alt_text, element_type)
+                        if alt_ref:
+                            return alt_ref
         return None
         
     # Return the highest scoring candidate
-    candidates.sort(key=lambda x: x[0], reverse=True)
+    candidates.sort(key=lambda x: (x[0], -x[3]), reverse=True)  # Score desc, line number asc
     return candidates[0][1]
 
 
 def extract_form_fields(snapshot_text: str) -> List[Dict[str, str]]:
     """
-    Two-pass strategy:
-      1. Try restricted mode (only after 'form' appears).
-      2. If no fields found, fall back to global scan so pages without 'form' keyword still work.
+    Enhanced form field extraction with better detection and iframe support.
     """
     def _scan(lines: List[str], gated: bool) -> List[Dict[str, str]]:
         fields_local: List[Dict[str, str]] = []
         in_form = False
-        for line in lines:
+        section_context = ""
+        
+        for i, line in enumerate(lines):
             line_lower = line.lower()
-            if gated and "form" in line_lower:
+            
+            # Track sections for better context
+            if "heading" in line_lower:
+                heading_match = re.search(r'"([^"]+)"', line)
+                if heading_match:
+                    section_context = heading_match.group(1)
+            
+            if gated and ("form" in line_lower or "personal information" in line_lower or "position information" in line_lower):
                 in_form = True
             if gated and not in_form:
                 continue
+                
             if _is_interactive_line(line_lower):
+                # Enhanced label extraction
                 label_match = re.search(r'"([^"]+)"', line)
                 label = label_match.group(1) if label_match else "Unlabeled field"
+                
+                # If no label found, try to get from context
+                if label == "Unlabeled field" and section_context:
+                    # Look at nearby lines for context
+                    for j in range(max(0, i-3), min(len(lines), i+3)):
+                        context_line = lines[j].strip()
+                        if (context_line and 
+                            not re.search(r'\[ref=', context_line) and
+                            not any(kw in context_line.lower() for kw in INTERACTIVE_KEYWORDS)):
+                            # Clean up context
+                            clean_context = re.sub(r'^- ', '', context_line)
+                            clean_context = re.sub(r':$', '', clean_context)
+                            if len(clean_context) > 1 and clean_context != "generic":
+                                label = clean_context
+                                break
+                
+                # Determine field type with enhanced detection
                 field_type = "text"
-                for t in INTERACTIVE_KEYWORDS:
-                    if t in line_lower:
-                        field_type = t
+                type_mappings = {
+                    "textbox": "text",
+                    "input": "text", 
+                    "textarea": "textarea",
+                    "combobox": "select",
+                    "select": "select",
+                    "checkbox": "checkbox",
+                    "radio": "radio",
+                    "radiogroup": "radio",
+                    "spinbutton": "number",
+                    "button": "button"
+                }
+                
+                for keyword, mapped_type in type_mappings.items():
+                    if keyword in line_lower:
+                        field_type = mapped_type
                         break
-                required = "required" in line_lower
-                fields_local.append({"label": label, "type": field_type, "required": required})
+                
+                # Special field type detection
+                if any(kw in label.lower() for kw in ["email", "@"]):
+                    field_type = "email"
+                elif any(kw in label.lower() for kw in ["phone", "tel"]):
+                    field_type = "tel"
+                elif any(kw in label.lower() for kw in ["date", "calendar"]):
+                    field_type = "date"
+                elif any(kw in label.lower() for kw in ["upload", "file", "cv", "resume"]):
+                    field_type = "file"
+                elif any(kw in label.lower() for kw in ["password", "pass"]):
+                    field_type = "password"
+                
+                required = "required" in line_lower or "*" in line
+                
+                field_info = {
+                    "label": label,
+                    "type": field_type,
+                    "required": required,
+                    "section": section_context
+                }
+                
+                fields_local.append(field_info)
+        
         return fields_local
 
     lines = snapshot_text.splitlines()
     fields = _scan(lines, gated=True)
     if not fields:
         fields = _scan(lines, gated=False)
-    # De-duplicate by label keeping first occurrence
+    
+    # Enhanced deduplication - keep most informative version
     dedup = {}
     for f in fields:
-        dedup.setdefault(f["label"], f)
+        label = f["label"]
+        if label not in dedup or (f.get("section") and not dedup[label].get("section")):
+            dedup[label] = f
+    
     return list(dedup.values())
 
 
 def analyze_goal(goal_text: str) -> Dict[str, Any]:
+    """Enhanced goal analysis with more comprehensive detection."""
     goal_lower = goal_text.lower()
     analysis = {
-        "requires_navigation": any(kw in goal_lower for kw in ["navigate", "go to", "open", "visit", "http://", "https://"]),
-        "requires_form_filling": any(kw in goal_lower for kw in ["fill", "input", "enter", "type", "form"]),
-        "requires_submission": any(kw in goal_lower for kw in ["submit", "send", "complete", "finish"]),
-        "requires_extraction": any(kw in goal_lower for kw in ["extract", "get", "find", "list", "scrape"]),
-        "requires_screenshot": any(kw in goal_lower for kw in ["screenshot", "capture", "image", "photo"]),
-        "requires_download": any(kw in goal_lower for kw in ["download", "save"]),
-        "requires_file_upload": any(kw in goal_lower for kw in ["upload" , "file" , "resume", "pdf"])
+        "requires_navigation": any(kw in goal_lower for kw in ["navigate", "go to", "open", "visit", "http://", "https://", "browse to"]),
+        "requires_form_filling": any(kw in goal_lower for kw in ["fill", "input", "enter", "type", "form", "complete form", "application"]),
+        "requires_submission": any(kw in goal_lower for kw in ["submit", "send", "complete", "finish", "apply", "save"]),
+        "requires_extraction": any(kw in goal_lower for kw in ["extract", "get", "find", "list", "scrape", "collect", "gather"]),
+        "requires_screenshot": any(kw in goal_lower for kw in ["screenshot", "capture", "image", "photo", "snap"]),
+        "requires_download": any(kw in goal_lower for kw in ["download", "save", "export"]),
+        "requires_file_upload": any(kw in goal_lower for kw in ["upload", "file", "resume", "pdf", "document", "cv", "attach"]),
+        "requires_selection": any(kw in goal_lower for kw in ["select", "choose", "pick", "option", "dropdown"]),
+        "requires_authentication": any(kw in goal_lower for kw in ["login", "sign in", "authenticate", "password", "username"])
     }
-    url_match = re.search(r"https?://[^\s)\"']+", goal_text)
-    analysis["target_url"] = url_match.group(0) if url_match else None
+    
+    # Enhanced URL extraction
+    url_patterns = [
+        r"https?://[^\s)\"']+",
+        r"www\.[^\s)\"']+",
+        r"[a-zA-Z0-9-]+\.[a-zA-Z]{2,}[^\s)\"']*"
+    ]
+    
+    for pattern in url_patterns:
+        url_match = re.search(pattern, goal_text)
+        if url_match:
+            url = url_match.group(0)
+            if not url.startswith(('http://', 'https://')):
+                url = 'https://' + url
+            analysis["target_url"] = url
+            break
+    else:
+        analysis["target_url"] = None
+    
     return analysis
 
 # # =====================================================================
