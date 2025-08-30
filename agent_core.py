@@ -355,16 +355,47 @@ class WebAgent:
                         field_type = "email"
                     elif any(kw in field_lower for kw in ["phone", "mobile", "telephone"]):
                         field_type = "phone"
+                    elif any(kw in field_lower for kw in ["date", "calendar"]):
+                        field_type = "date"
+                    elif any(kw in field_lower for kw in ["pay", "salary", "money"]):
+                        field_type = "number"
                         
                     form_fields.append(f"- Text field, {input_field}, ref:{ref}, type:{field_type}")
                     added_refs.add(ref)
             
-            # 2. Process dropdowns/selects
+            # 2. Process dropdowns/selects with their options
             dropdowns_list = self.state.page_state.get("comboboxes", [])
             for dropdown in dropdowns_list:
                 ref = refs.get(dropdown, [''])[0]
                 if ref and ref not in added_refs:
-                    dropdowns.append(f"- Dropdown, {dropdown}, ref:{ref}")
+                    # Look for options in refs under <dropdown>_options key
+                    options_key = f"{dropdown}_options"
+                    options = refs.get(options_key, [])
+                    
+                    # If no options found with that key, try to find options from snapshot
+                    if not options and self.state.page_state and "snapshot_text" in self.state.page_state:
+                        snapshot_lines = self.state.page_state["snapshot_text"].splitlines()
+                        # Find the line with this dropdown and scan for options after it
+                        for i, line in enumerate(snapshot_lines):
+                            if dropdown in line and "combobox" in line.lower():
+                                # Scan next lines for options
+                                for j in range(i+1, min(len(snapshot_lines), i+15)):
+                                    next_line = snapshot_lines[j].strip()
+                                    if 'option' in next_line.lower() and '"' in next_line:
+                                        # Extract option text
+                                        option_match = re.search(r'"([^"]+)"', next_line)
+                                        if option_match:
+                                            option_text = option_match.group(1).strip()
+                                            # Remove [selected] or other annotations
+                                            option_text = re.sub(r'\s*\[.*\]$', '', option_text).strip()
+                                            if option_text and option_text not in options:
+                                                options.append(option_text)
+                                    elif next_line and not next_line.startswith('-'):
+                                        break
+                                break
+                    
+                    options_str = f", options:[{','.join(options)}]" if options else ""
+                    dropdowns.append(f"- Dropdown, {dropdown}, ref:{ref}{options_str}")
                     added_refs.add(ref)
             
             # 3. Process radio groups and radio buttons
@@ -372,11 +403,17 @@ class WebAgent:
             for radio in radio_groups_list:
                 ref = refs.get(radio, [''])[0]
                 if ref and ref not in added_refs:
-                    radio_groups.append(f"- Radio group, {radio}, ref:{ref}")
-                    # Add individual radio buttons within the group
-                    radio_refs = refs.get(radio, [])
-                    for i, r in enumerate(radio_refs[1:], 1):
-                        radio_groups.append(f"  - Radio option, {radio} {i}, ref:{r}")
+                    # Check if this is a skill rating or yes/no question
+                    radio_lower = radio.lower()
+                    if any(skill in radio_lower for skill in ["microsoft", "communication", "seo", "skill"]):
+                        # This is a skill rating, find the rating options
+                        rating_options = ["1 out of 5", "2 out of 5", "3 out of 5", "4 out of 5", "5 out of 5"]
+                        radio_groups.append(f"- Skill rating, {radio}, ref:{ref}, options:[{','.join(rating_options)}]")
+                    elif "?" in radio:
+                        # This is a yes/no question
+                        radio_groups.append(f"- Yes/No question, {radio}, ref:{ref}, options:[Yes,No]")
+                    else:
+                        radio_groups.append(f"- Radio group, {radio}, ref:{ref}")
                     added_refs.add(ref)
             
             # 4. Process checkboxes
@@ -384,13 +421,13 @@ class WebAgent:
             for checkbox in checkboxes_list:
                 ref = refs.get(checkbox, [''])[0]
                 if ref and ref not in added_refs:
-                    checkboxes.append(f"- Checkbox, {checkbox}, ref:{checkbox}, checked:false")
+                    checkboxes.append(f"- Checkbox, {checkbox}, ref:{ref}, checked:false")
                     added_refs.add(ref)
 
             # 5. Categorize buttons
             buttons_list = self.state.page_state.get("buttons", [])
             submission_keywords = ["submit", "next", "continue", "apply", "finish"]
-            interactive_keywords = ["add", "more", "upload", "browse", "choose", "select"]
+            interactive_keywords = ["add", "more", "upload", "browse", "choose", "select", "date"]
             
             for button in buttons_list:
                 ref = refs.get(button, [''])[0]
@@ -404,10 +441,10 @@ class WebAgent:
                         interactive_buttons.append(f"- Button, '{button}', ref:{ref}")
                     added_refs.add(ref)
         
-        # Combine all fillable fields in the order they appear on the page
+        # Combine all fillable fields in a logical order
         all_fillable = []
         
-        # Get all elements with their order from the page state
+        # Add form fields in order of appearance if possible
         if self.state.page_state and "snapshot_text" in self.state.page_state:
             snapshot_lines = self.state.page_state["snapshot_text"].splitlines()
             
@@ -418,35 +455,40 @@ class WebAgent:
             for line in snapshot_lines:
                 # Check for text fields
                 for field in form_fields:
-                    if field.split(',', 1)[1].strip().split(',')[0].strip() in line and field not in added_elements:
+                    field_label = field.split(',', 1)[1].strip().split(',')[0].strip()
+                    if field_label in line and field not in added_elements:
                         all_fillable.append(field)
                         added_elements.add(field)
                         break
                 
                 # Check for dropdowns
                 for dropdown in dropdowns:
-                    if dropdown.split(',', 1)[1].strip().split(',')[0].strip() in line and dropdown not in added_elements:
+                    dropdown_label = dropdown.split(',', 1)[1].strip().split(',')[0].strip()
+                    if dropdown_label in line and dropdown not in added_elements:
                         all_fillable.append(dropdown)
                         added_elements.add(dropdown)
                         break
                         
                 # Check for radio groups
                 for radio in radio_groups:
-                    if radio.split(',', 1)[1].strip().split(',')[0].strip() in line and radio not in added_elements:
+                    radio_label = radio.split(',', 1)[1].strip().split(',')[0].strip()
+                    if radio_label in line and radio not in added_elements:
                         all_fillable.append(radio)
                         added_elements.add(radio)
                         break
                         
                 # Check for checkboxes
                 for checkbox in checkboxes:
-                    if checkbox.split(',', 1)[1].strip().split(',')[0].strip() in line and checkbox not in added_elements:
+                    checkbox_label = checkbox.split(',', 1)[1].strip().split(',')[0].strip()
+                    if checkbox_label in line and checkbox not in added_elements:
                         all_fillable.append(checkbox)
                         added_elements.add(checkbox)
                         break
                         
                 # Check for interactive buttons that might reveal form fields
                 for button in interactive_buttons:
-                    if button.split(',', 1)[1].strip().split(',')[0].strip() in line and button not in added_elements:
+                    button_label = button.split(',', 1)[1].strip().split(',')[0].strip().strip("'")
+                    if button_label in line and button not in added_elements:
                         all_fillable.append(button)
                         added_elements.add(button)
                         break
@@ -469,6 +511,20 @@ class WebAgent:
         if submission_buttons:
             context_parts.append("\n=== SUBMISSION BUTTONS ===\n" + "\n".join(submission_buttons))
         
+        # Add file upload areas if found
+        file_uploads = self.state.page_state.get("file_uploads", [])
+        if file_uploads:
+            file_upload_text = []
+            for file_upload in file_uploads:
+                # Try to find ref for file upload
+                upload_ref = ""
+                for label, ref_list in refs.items():
+                    if "browse files" in label.lower() or "upload" in label.lower():
+                        upload_ref = ref_list[0] if ref_list else ""
+                        break
+                file_upload_text.append(f"- File upload, {file_upload}, ref:{upload_ref}")
+            context_parts.append("\n=== FILE UPLOADS ===\n" + "\n".join(file_upload_text))
+        
         page_context = "\n".join(context_parts)
         
         # Debug: Print the page context being sent to the LLM
@@ -479,13 +535,6 @@ class WebAgent:
         print("="*80 + "\n")
         
         filler_prompt = FILLER_PROMPT_TEMPLATE.format(page_context=page_context)
-        
-        # Debug: Print the full prompt being sent to the LLM
-        print("\n" + "="*80)
-        print("FULL PROMPT BEING SENT TO LLM:")
-        print("="*80)
-        print(filler_prompt)
-        print("="*80 + "\n")
         
         # Create a proper message sequence for the LLM
         filler_messages = [
