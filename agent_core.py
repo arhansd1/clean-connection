@@ -334,6 +334,7 @@ class WebAgent:
         dropdowns = []
         radio_groups = []
         checkboxes = []
+        file_uploads = []
         
         if self.state.page_state:
             # Get all element references
@@ -345,84 +346,66 @@ class WebAgent:
             # 1. Process regular input fields
             inputs = self.state.page_state.get("inputs", [])
             for input_field in inputs:
-                ref = refs.get(input_field, [''])[0]
-                if ref and ref not in added_refs:
-                    # Format field with clean structure
-                    field_lower = input_field.lower()
-                    field_type = "text"
-                    
-                    if any(kw in field_lower for kw in ["email", "e-mail"]):
-                        field_type = "email"
-                    elif any(kw in field_lower for kw in ["phone", "mobile", "telephone"]):
-                        field_type = "phone"
-                    elif any(kw in field_lower for kw in ["date", "calendar"]):
-                        field_type = "date"
-                    elif any(kw in field_lower for kw in ["pay", "salary", "money"]):
-                        field_type = "number"
+                field_refs = refs.get(input_field, [])
+                for ref in field_refs:
+                    if ref and ref not in added_refs:
+                        # Format field with clean structure
+                        field_lower = input_field.lower()
+                        field_type = "text"
                         
-                    form_fields.append(f"- Text field, {input_field}, ref:{ref}, type:{field_type}")
-                    added_refs.add(ref)
+                        if any(kw in field_lower for kw in ["email", "e-mail"]):
+                            field_type = "email"
+                        elif any(kw in field_lower for kw in ["phone", "mobile", "telephone"]):
+                            field_type = "phone"
+                        elif any(kw in field_lower for kw in ["date", "calendar"]):
+                            field_type = "date"
+                        elif any(kw in field_lower for kw in ["pay", "salary", "money"]):
+                            field_type = "number"
+                            
+                        form_fields.append(f"- Text field, {input_field}, ref:{ref}, type:{field_type}")
+                        added_refs.add(ref)
             
-            # 2. Process dropdowns/selects with their options
+            # 2. Process dropdowns/selects with their options - USE REF-BASED IDENTIFICATION
             dropdowns_list = self.state.page_state.get("comboboxes", [])
-            for dropdown in dropdowns_list:
-                ref = refs.get(dropdown, [''])[0]
-                if ref and ref not in added_refs:
-                    # Look for options in refs under <dropdown>_options key
-                    options_key = f"{dropdown}_options"
-                    options = refs.get(options_key, [])
-                    
-                    # If no options found with that key, try to find options from snapshot
-                    if not options and self.state.page_state and "snapshot_text" in self.state.page_state:
-                        snapshot_lines = self.state.page_state["snapshot_text"].splitlines()
-                        # Find the line with this dropdown and scan for options after it
-                        for i, line in enumerate(snapshot_lines):
-                            if dropdown in line and "combobox" in line.lower():
-                                # Scan next lines for options
-                                for j in range(i+1, min(len(snapshot_lines), i+15)):
-                                    next_line = snapshot_lines[j].strip()
-                                    if 'option' in next_line.lower() and '"' in next_line:
-                                        # Extract option text
-                                        option_match = re.search(r'"([^"]+)"', next_line)
-                                        if option_match:
-                                            option_text = option_match.group(1).strip()
-                                            # Remove [selected] or other annotations
-                                            option_text = re.sub(r'\s*\[.*\]$', '', option_text).strip()
-                                            if option_text and option_text not in options:
-                                                options.append(option_text)
-                                    elif next_line and not next_line.startswith('-'):
-                                        break
-                                break
-                    
-                    options_str = f", options:[{','.join(options)}]" if options else ""
-                    dropdowns.append(f"- Dropdown, {dropdown}, ref:{ref}{options_str}")
-                    added_refs.add(ref)
+            for dropdown_id in dropdowns_list:
+                if dropdown_id.startswith("combobox_"):
+                    ref = dropdown_id.replace("combobox_", "")
+                    if ref and ref not in added_refs:
+                        # Get options from refs storage
+                        options_key = f"{dropdown_id}_options"
+                        options = refs.get(options_key, [])
+                        
+                        options_str = f", options:[{','.join(options)}]" if options else ""
+                        dropdowns.append(f"- Dropdown, ref:{ref}{options_str}, type:select")
+                        added_refs.add(ref)
             
             # 3. Process radio groups and radio buttons
             radio_groups_list = self.state.page_state.get("radio_groups", [])
             for radio in radio_groups_list:
-                ref = refs.get(radio, [''])[0]
-                if ref and ref not in added_refs:
-                    # Check if this is a skill rating or yes/no question
-                    radio_lower = radio.lower()
-                    if any(skill in radio_lower for skill in ["microsoft", "communication", "seo", "skill"]):
-                        # This is a skill rating, find the rating options
-                        rating_options = ["1 out of 5", "2 out of 5", "3 out of 5", "4 out of 5", "5 out of 5"]
-                        radio_groups.append(f"- Skill rating, {radio}, ref:{ref}, options:[{','.join(rating_options)}]")
-                    elif "?" in radio:
-                        # This is a yes/no question
-                        radio_groups.append(f"- Yes/No question, {radio}, ref:{ref}, options:[Yes,No]")
-                    else:
-                        radio_groups.append(f"- Radio group, {radio}, ref:{ref}")
-                    added_refs.add(ref)
+                radio_refs = refs.get(radio, [])
+                for ref in radio_refs:
+                    if ref and ref not in added_refs:
+                        # Check if this is a skill rating or yes/no question
+                        radio_lower = radio.lower()
+                        if any(skill in radio_lower for skill in ["microsoft", "communication", "seo", "skill"]):
+                            # This is a skill rating, find the rating options
+                            rating_options = ["1 out of 5", "2 out of 5", "3 out of 5", "4 out of 5", "5 out of 5"]
+                            radio_groups.append(f"- Skill rating, {radio}, ref:{ref}, options:[{','.join(rating_options)}], type:radio")
+                        elif "?" in radio:
+                            # This is a yes/no question
+                            radio_groups.append(f"- Yes/No question, {radio}, ref:{ref}, options:[Yes,No], type:radio")
+                        else:
+                            radio_groups.append(f"- Radio group, {radio}, ref:{ref}, type:radio")
+                        added_refs.add(ref)
             
             # 4. Process checkboxes
             checkboxes_list = self.state.page_state.get("checkboxes", [])
             for checkbox in checkboxes_list:
-                ref = refs.get(checkbox, [''])[0]
-                if ref and ref not in added_refs:
-                    checkboxes.append(f"- Checkbox, {checkbox}, ref:{ref}, checked:false")
-                    added_refs.add(ref)
+                checkbox_refs = refs.get(checkbox, [])
+                for ref in checkbox_refs:
+                    if ref and ref not in added_refs:
+                        checkboxes.append(f"- Checkbox, {checkbox}, ref:{ref}, checked:false, type:checkbox")
+                        added_refs.add(ref)
 
             # 5. Categorize buttons
             buttons_list = self.state.page_state.get("buttons", [])
@@ -430,15 +413,42 @@ class WebAgent:
             interactive_keywords = ["add", "more", "upload", "browse", "choose", "select", "date"]
             
             for button in buttons_list:
-                ref = refs.get(button, [''])[0]
+                button_refs = refs.get(button, [])
+                for ref in button_refs:
+                    if ref and ref not in added_refs:
+                        button_lower = button.lower()
+                        if any(keyword in button_lower for keyword in submission_keywords):
+                            submission_buttons.append(f"- Submit button, '{button}', ref:{ref}, type:button")
+                        elif any(keyword in button_lower for keyword in interactive_keywords):
+                            interactive_buttons.append(f"- Action button, '{button}', ref:{ref}, type:button")
+                        else:
+                            interactive_buttons.append(f"- Button, '{button}', ref:{ref}, type:button")
+                        added_refs.add(ref)
+        
+        # 6. Process file uploads - ENHANCED WITH CLEAR LABELS AND TYPE
+        file_upload_list = self.state.page_state.get("file_uploads", [])
+        for file_upload_id in file_upload_list:
+            if file_upload_id.startswith("file_upload_"):
+                ref = file_upload_id.replace("file_upload_", "")
                 if ref and ref not in added_refs:
-                    button_lower = button.lower()
-                    if any(keyword in button_lower for keyword in submission_keywords):
-                        submission_buttons.append(f"- Submit button, '{button}', ref:{ref}")
-                    elif any(keyword in button_lower for keyword in interactive_keywords):
-                        interactive_buttons.append(f"- Action button, '{button}', ref:{ref}")
-                    else:
-                        interactive_buttons.append(f"- Button, '{button}', ref:{ref}")
+                    # Try to find a descriptive label for this file upload
+                    file_label = "File Upload"
+                    # Look for labels that contain upload-related keywords
+                    for label, ref_list in refs.items():
+                        if ref in ref_list and any(kw in label.lower() for kw in ["upload", "file", "cv", "resume", "cover", "browse"]):
+                            file_label = label
+                            break
+                    
+                    # Also check the original file uploads list for context
+                    original_uploads = self.state.page_state.get("file_uploads_detailed", [])
+                    for upload in original_uploads:
+                        if f"ref:{ref}" in upload:
+                            # Extract label from the original upload entry
+                            label_match = re.search(r'file_upload: (.*?)(?:,|$)', upload)
+                            if label_match:
+                                file_label = label_match.group(1)
+                    
+                    file_uploads.append(f"- File upload, {file_label}, ref:{ref}, type:file")
                     added_refs.add(ref)
         
         # Combine all fillable fields in a logical order
@@ -455,47 +465,49 @@ class WebAgent:
             for line in snapshot_lines:
                 # Check for text fields
                 for field in form_fields:
-                    field_label = field.split(',', 1)[1].strip().split(',')[0].strip()
-                    if field_label in line and field not in added_elements:
+                    if f"ref:{field.split('ref:')[-1].split(',')[0].strip()}" in line and field not in added_elements:
                         all_fillable.append(field)
                         added_elements.add(field)
                         break
                 
                 # Check for dropdowns
                 for dropdown in dropdowns:
-                    dropdown_label = dropdown.split(',', 1)[1].strip().split(',')[0].strip()
-                    if dropdown_label in line and dropdown not in added_elements:
+                    if f"ref:{dropdown.split('ref:')[-1].split(',')[0].strip()}" in line and dropdown not in added_elements:
                         all_fillable.append(dropdown)
                         added_elements.add(dropdown)
                         break
                         
                 # Check for radio groups
                 for radio in radio_groups:
-                    radio_label = radio.split(',', 1)[1].strip().split(',')[0].strip()
-                    if radio_label in line and radio not in added_elements:
+                    if f"ref:{radio.split('ref:')[-1].split(',')[0].strip()}" in line and radio not in added_elements:
                         all_fillable.append(radio)
                         added_elements.add(radio)
                         break
                         
                 # Check for checkboxes
                 for checkbox in checkboxes:
-                    checkbox_label = checkbox.split(',', 1)[1].strip().split(',')[0].strip()
-                    if checkbox_label in line and checkbox not in added_elements:
+                    if f"ref:{checkbox.split('ref:')[-1].split(',')[0].strip()}" in line and checkbox not in added_elements:
                         all_fillable.append(checkbox)
                         added_elements.add(checkbox)
                         break
                         
                 # Check for interactive buttons that might reveal form fields
                 for button in interactive_buttons:
-                    button_label = button.split(',', 1)[1].strip().split(',')[0].strip().strip("'")
-                    if button_label in line and button not in added_elements:
+                    if f"ref:{button.split('ref:')[-1].split(',')[0].strip()}" in line and button not in added_elements:
                         all_fillable.append(button)
                         added_elements.add(button)
+                        break
+                
+                # Check for file uploads
+                for file_upload in file_uploads:
+                    if f"ref:{file_upload.split('ref:')[-1].split(',')[0].strip()}" in line and file_upload not in added_elements:
+                        all_fillable.append(file_upload)
+                        added_elements.add(file_upload)
                         break
         
         # If we couldn't determine order from snapshot, just combine all lists
         if not all_fillable:
-            all_fillable = form_fields + dropdowns + radio_groups + checkboxes + interactive_buttons
+            all_fillable = form_fields + dropdowns + radio_groups + checkboxes + interactive_buttons + file_uploads
         
         # Use the enhanced form field parser to get clean output
         form_field_text = "\n".join(all_fillable)
@@ -511,19 +523,11 @@ class WebAgent:
         if submission_buttons:
             context_parts.append("\n=== SUBMISSION BUTTONS ===\n" + "\n".join(submission_buttons))
         
-        # Add file upload areas if found
-        file_uploads = self.state.page_state.get("file_uploads", [])
+        # Add file upload areas if found - CLEARLY MARKED AS FILE TYPE
         if file_uploads:
-            file_upload_text = []
-            for file_upload in file_uploads:
-                # Try to find ref for file upload
-                upload_ref = ""
-                for label, ref_list in refs.items():
-                    if "browse files" in label.lower() or "upload" in label.lower():
-                        upload_ref = ref_list[0] if ref_list else ""
-                        break
-                file_upload_text.append(f"- File upload, {file_upload}, ref:{upload_ref}")
-            context_parts.append("\n=== FILE UPLOADS ===\n" + "\n".join(file_upload_text))
+            context_parts.append("\n=== FILE UPLOADS (USE browser_file_upload TOOL) ===")
+            context_parts.append("File path: /Users/arhan/Desktop/clean-connection 2/sample.pdf")
+            context_parts.append("\n".join(file_uploads))
         
         page_context = "\n".join(context_parts)
         
@@ -534,18 +538,19 @@ class WebAgent:
         print(page_context)
         print("="*80 + "\n")
         
+        # Use the updated prompt template with explicit file upload instructions
         filler_prompt = FILLER_PROMPT_TEMPLATE.format(page_context=page_context)
         
         # Create a proper message sequence for the LLM
         filler_messages = [
             SystemMessage(content=filler_prompt),
-            HumanMessage(content="Please fill out this form with appropriate dummy data."),
+            HumanMessage(content="Please fill out this form with appropriate dummy data. Remember to use browser_file_upload for any file upload fields!"),
         ]
 
         try:
             response = self.llm.invoke(filler_messages)
             if not response.content:
-                response.content = "Planning to fill out the form fields."
+                response.content = "Planning to fill out the form fields including file uploads."
             return {"messages": messages + [response]}
         except Exception as e:
             error_msg = f"Error in filler node: {str(e)}"

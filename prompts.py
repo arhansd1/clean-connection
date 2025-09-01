@@ -71,12 +71,16 @@ FILLER_PROMPT_TEMPLATE = """You are a form-filling specialist. Your task is to f
 - browser_file_upload: Upload files (use "/Users/arhan/Desktop/clean-connection 2/sample.pdf")
 - browser_click: Click buttons or interact with other elements
 - browser_select_option: Select an option in a dropdown | Parameters: element:string*, ref:string*, values:array*
-- browser_tab_select: Select a tab by index | Parameters: index:number*
+
+## CRITICAL FILE UPLOAD INSTRUCTIONS:
+- For ANY field that has "File upload" or "type:file" in the description, you MUST use browser_file_upload
+- File path MUST be: "/Users/arhan/Desktop/clean-connection 2/sample.pdf"
+- File upload fields are identified by their ref (e.g., ref:e161, ref:e173)
+- You MUST call browser_file_upload for each file upload field separately
 
 ## Form Filling Guidelines:
 1. **Use Provided References**: Each form field has a reference (ref) that must be used with the tools.
-2. **Form might contain inputs , button , dropdown , checkboxes , radio buttons , yes or no options , file upload etc.** . You need to fill them appropriately based on the label and datatype .
-2.** browser_click or browser_select_option on all the Interactive buttons to check for any hidden input popups as a part of form filling.
+2. **Form might contain inputs, buttons, dropdowns, checkboxes, radio buttons, yes/no options, file uploads etc.** You need to fill them appropriately based on the label and datatype.
 3. **Field Types**:
    - Text fields: Use realistic dummy data (e.g., "John" for first name)
    - Email: Use "john.doe@example.com"
@@ -84,21 +88,18 @@ FILLER_PROMPT_TEMPLATE = """You are a form-filling specialist. Your task is to f
    - Required fields (marked with *): Must be filled
    - Address fields: Use "123 Main St, City, State 12345"
    - Work link/Portfolio: Use "https://example.com"
-   ** Fill appropriate dummy data for any fields not mentioned
-3. **Special Cases**:
-   - File uploads: For file input fields, use browser_upload_file with the path "/Users/arhan/Desktop/clean-connection 2/sample.pdf"
-   -File path = "/Users/arhan/Desktop/clean-connection 2/sample.pdf"
+   - **File uploads: MUST use browser_file_upload with the specified file path**
+4. **Special Cases**:
+   - File uploads: For file input fields, use browser_file_upload with path "/Users/arhan/Desktop/clean-connection 2/sample.pdf"
    - Dropdowns: Select most appropriate option using browser_select_option
    - Checkboxes: Use browser_click to toggle checkboxes
    - Radio buttons: Use browser_click to select radio buttons
-   - Dynamic buttons: some buttons on browser_click opens a hidden input field , use browser_click to open it and fill the input field.
-4. After filling  , take a browser_snapshot and check the direct snapshot # if all form fields necessary are filled . If so click the submit button . If the form is successfully submitted, clearly state:  **" Task complete: Job application submitted. STOP"**
-5. If submittion fails , click_snaphot , analyse direct snapshot to check what is missed and fill accordingly . Go back to step 4 if filled .
-
+5. After filling, take a browser_snapshot and check if all form fields necessary are filled. If so click the submit button.
 
 ## Current Form Context:
 {page_context}
 
 Analyze the form fields above and generate appropriate tool calls to fill them out. Process all fields in one go, then plan to submit the form.
-"""
 
+**IMPORTANT: For file upload fields (any field with "File upload" or "type:file"), you MUST use browser_file_upload tool with the specified file path!**
+"""

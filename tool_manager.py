@@ -196,39 +196,55 @@ class ToolManager:
 
         # Handle file upload parameter conversion
         if name == "browser_file_upload":
-            # Convert any file path parameter to the required paths array
-            file_path = args.get("filePath")
+            print(f"[DEBUG] Processing file upload with args: {args}")
+            
+            # Get and validate file path
+            file_path = args.get("filePath") or args.get("path")
             if not file_path:
                 return "Error: No file path provided for upload"
                 
-            # Prepare upload args with just the essential parameters
+            # Ensure file exists
+            if not os.path.exists(file_path):
+                return f"Error: File not found at path: {file_path}"
+            
+            # Prepare upload args with absolute path
+            file_path = os.path.abspath(file_path)
             upload_args = {"paths": [file_path]}
-            if "ref" in args:
-                upload_args["ref"] = args["ref"]
+            
+            # Add ref if provided
+            if "ref" in args and args["ref"]:
+                ref = args["ref"]
+                upload_args["ref"] = ref
                 
-                # Only attempt to click if we have a ref
+                print(f"[DEBUG] Attempting to click file input with ref: {ref}")
+                
                 try:
-                    # Get the element text from the ref if available
-                    element_text = f"ref:{args['ref']}"  # Default element text
+                    # Try to find the element text from page state
+                    element_text = f"ref:{ref}"  # Default element text
                     if hasattr(self, 'state') and hasattr(self.state, 'page_state') and 'refs' in self.state.page_state:
                         for text, refs in self.state.page_state['refs'].items():
-                            if args['ref'] in refs:
+                            if ref in refs:
                                 element_text = text
+                                print(f"[DEBUG] Found element text for ref {ref}: {element_text}")
                                 break
                     
-                    # Single click attempt with both ref and element
-                    await self.session.call_tool(
+                    # Click the file input element
+                    click_result = await self.session.call_tool(
                         "browser_click", 
-                        {"ref": args['ref'], "element": element_text}
+                        {"ref": ref, "element": element_text}
                     )
+                    print(f"[DEBUG] Click result: {click_result}")
+                    
+                    # Small delay to ensure the file dialog is ready
+                    await asyncio.sleep(1)
+                    
                 except Exception as e:
-                    # If click fails, still try the upload as some file inputs don't need a click
-                    pass
+                    print(f"[WARNING] Click before upload failed, continuing with upload: {str(e)}")
             
             # Update args for the actual upload
+            print(f"[DEBUG] Executing file upload with args: {upload_args}")
             args = upload_args
         
-
         # Adapt common parameter synonyms
         if name in self.tool_schemas:
             schema = self.tool_schemas[name]

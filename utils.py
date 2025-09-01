@@ -99,22 +99,19 @@ class FormFieldParser:
         except (AttributeError, TypeError):
             return [""] * expected_parts
     
-    def extract_options(self, field_line: str) -> List[str]:
-
-        """Extract options from field line."""
-
+    # In parse_form_fields_enhanced, update the options extraction:
+    def extract_options(self, field_line: str, ref: str) -> List[str]:
+        """Extract options specific to a ref"""
+        # First try to get options from ref-specific storage
+        if hasattr(self, 'page_state') and f"{ref}_options" in self.page_state.get("refs", {}):
+            return self.page_state["refs"][f"{ref}_options"]
+        
+        # Fallback to inline extraction
         options_match = self.options_pattern.search(field_line)
-
         if options_match:
-
             options_str = options_match.group(1)
-
-            # Split by comma and clean up
-
             options = [opt.strip() for opt in options_str.split(',')]
-
-            return [opt for opt in options if opt]  # Remove empty options
-
+            return [opt for opt in options if opt]
         return []
 
     
@@ -471,29 +468,19 @@ def extract_interactive_elements(snapshot_text: Any) -> Dict[str, Any]:
             result["title"] = line.split(":", 1)[-1].strip()
             continue
         
-         # Enhanced file upload detection
-        if any(kw in line_lower for kw in ["browse files", "drag and drop files", "uploaded files"]):
+        # Enhanced file upload detection - USE REFS INSTEAD OF LABELS
+        if any(kw in line_lower for kw in file_keywords):
             refs = ref_pattern.findall(line)
             if refs:
-                # Look for context lines to get meaningful label
-                context_lines = context_map.get(refs[0], [])
-                file_label = "File Upload"
-                
-                # Check previous lines for file upload context
-                for j in range(max(0, i-3), i):
-                    prev_line = _to_str(lines[j]).strip()
-                    if any(kw in prev_line.lower() for kw in ["please upload", "upload your", "cv", "cover letter", "resume"]):
-                        # Extract the meaningful part
-                        if "please upload" in prev_line.lower():
-                            file_label = prev_line.strip().lstrip('- generic:').strip()
-                        break
-                
-                # Add to file uploads
-                result["file_uploads"].append(file_label)
-                result["interactives"].append(f"file_upload: {file_label}")
-                result["all_clickables"].append(file_label)
-                result["refs"][file_label] = refs
-        
+                # Create unique identifier using ref instead of label
+                for ref in refs:
+                    file_id = f"file_upload_{ref}"
+                    if file_id not in result["file_uploads"]:
+                        result["file_uploads"].append(file_id)
+                        result["interactives"].append(f"file_upload: {file_id}")
+                        result["all_clickables"].append(file_id)
+                        result["refs"][file_id] = [ref]
+
         # Enhanced checkbox detection - look for iframe checkbox patterns
         if "checkbox" in line_lower:
             # Extract checkbox label from quoted text or context
@@ -587,18 +574,14 @@ def extract_interactive_elements(snapshot_text: Any) -> Dict[str, Any]:
                         if next_line and not next_line.lower().startswith('- option'):
                             break
                 if opts:
-                    # label for combobox (try quoted label or context)
-                    comb_label = labels[0] if labels else (context_map.get(refs[0], ['Combobox'])[0])
-                    # add a descriptive entry
-                    combo_desc = f"{comb_label} -> options: {opts}"
-                    if combo_desc not in result["interactives"]:
-                        result["interactives"].append(combo_desc)
-                    if comb_label not in result["comboboxes"]:
-                        result["comboboxes"].append(comb_label)
-                    # store options under refs
-                    for r in refs:
-                        result["refs"].setdefault(comb_label, []).append(r)
-                        result["refs"].setdefault(f"{comb_label}_options", []).extend(opts)
+                    # Store each combobox separately with its ref and options
+                    for ref in refs:
+                        combobox_id = f"combobox_{ref}"
+                        if combobox_id not in result["comboboxes"]:
+                            result["comboboxes"].append(combobox_id)
+                            result["interactives"].append(f"dropdown: {combobox_id}")
+                            result["refs"][combobox_id] = [ref]
+                            result["refs"][f"{combobox_id}_options"] = opts
             
             # Enhanced label extraction for elements without quoted labels
             if not labels and refs:
@@ -803,7 +786,6 @@ def extract_interactive_elements(snapshot_text: Any) -> Dict[str, Any]:
             result["interactives"].append(f"question: {question}")
     
     return result
-
 
 def find_element_ref(snapshot_text: Any, element_text: str, element_type: str = None) -> Optional[str]:
     """
