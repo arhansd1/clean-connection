@@ -11,12 +11,8 @@ from langgraph.graph import START
 from langgraph.graph import MessagesState
 
 from tool_manager import ToolManager
-from utils import extract_interactive_elements, truncate_text, find_element_ref, analyze_goal, extract_form_fields, _is_interactive_line, parse_form_fields_enhanced
+from utils import extract_interactive_elements, truncate_text, find_element_ref
 from prompts import SYSTEM_PROMPT_TEMPLATE, FILLER_PROMPT_TEMPLATE
-
-import base64
-import os
-from pathlib import Path
 
 @dataclass
 class AgentState:
@@ -511,7 +507,7 @@ class WebAgent:
         
         # Use the enhanced form field parser to get clean output
         form_field_text = "\n".join(all_fillable)
-        clean_formatted_fields = parse_form_fields_enhanced(form_field_text)
+        clean_formatted_fields = form_field_text
         
         # Build the context parts
         context_parts = [
