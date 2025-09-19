@@ -13,6 +13,7 @@ from langgraph.graph import MessagesState
 from tool_manager import ToolManager
 from utils import extract_interactive_elements, truncate_text, find_element_ref
 from prompts import SYSTEM_PROMPT_TEMPLATE, FILLER_PROMPT_TEMPLATE
+from tree_parser import parse_snapshot  # Import the new tree parser
 
 @dataclass
 class AgentState:
@@ -24,6 +25,7 @@ class AgentState:
     page_state: Dict[str, Any] = field(default_factory=dict)
     step_count: int = 0
     max_steps: int = 100
+    max_tool_time: int = 30
     errors: List[str] = field(default_factory=list)
     task_complete: bool = False
  
@@ -223,16 +225,55 @@ class WebAgent:
                                 if tool_args["ref"] in refs:
                                     tool_args["element"] = element
                                     break
+
+                # Normalize select option arguments: tool expects 'values' as an array
+                if tool_name == "browser_select_option":
+                    if not tool_args.get("values"):
+                        # Accept common variants and coerce to list
+                        for k in ["text", "value", "option", "label"]:
+                            if k in tool_args and tool_args[k]:
+                                v = tool_args[k]
+                                tool_args["values"] = v if isinstance(v, list) else [v]
+                                break
+                    # Remove non-schema keys that might confuse the tool
+                    for k in ["text", "value", "option", "label"]:
+                        if k in tool_args:
+                            tool_args.pop(k, None)
                 
                 # Print raw metadata before execution
                 print(f"\n[TOOL_METADATA] name={tool_name} args={tool_args} call_id={tool_id}")
-                
-                try:
-                    result = await self.tool_manager.execute_tool(tool_name, tool_args)
-                    print(f"   - {tool_name} executed successfully")
-                except Exception as e:
-                    print(f"   - Error executing {tool_name}: {str(e)}")
-                    raise
+
+                # Execute tool with timeout and single retry on transient errors
+                async def _run_once():
+                    return await self.tool_manager.execute_tool(tool_name, tool_args)
+
+                attempt = 0
+                max_attempts = 2 if tool_name in ["browser_click", "browser_select_option", "browser_type"] else 1
+                last_error: Optional[Exception] = None
+                result = None
+                while attempt < max_attempts:
+                    attempt += 1
+                    try:
+                        result = await asyncio.wait_for(_run_once(), timeout=getattr(self.state, "max_tool_time", 30))
+                        print(f"   - {tool_name} executed successfully (attempt {attempt}/{max_attempts})")
+                        break
+                    except asyncio.TimeoutError as te:
+                        last_error = te
+                        print(f"   - Timeout executing {tool_name} (attempt {attempt}/{max_attempts}) after {getattr(self.state, 'max_tool_time', 30)}s")
+                    except Exception as e:
+                        last_error = e
+                        print(f"   - Error executing {tool_name} (attempt {attempt}/{max_attempts}): {str(e)}")
+
+                    # Before retry, try to refresh snapshot to get latest refs/state
+                    if attempt < max_attempts and "browser_snapshot" in getattr(self.tool_manager, "tool_schemas", {}):
+                        try:
+                            print("   - Refreshing snapshot before retry...")
+                            await asyncio.wait_for(self.tool_manager.execute_tool("browser_snapshot", {}), timeout=20)
+                        except Exception as e:
+                            print(f"   - Snapshot refresh failed: {str(e)}")
+
+                if result is None and last_error is not None:
+                    raise last_error
                 
                 # Special handling for snapshot
                 if tool_name == "browser_snapshot":
@@ -240,6 +281,15 @@ class WebAgent:
                     self.state.page_state["snapshot_text"] = result
                     page_elements = extract_interactive_elements(result)
                     self.state.page_state.update(page_elements)
+                    
+                    # NEW: Also parse using tree parser for form fields
+                    try:
+                        tree_form_fields = parse_snapshot(result)
+                        self.state.page_state["tree_form_fields"] = tree_form_fields
+                        print(f"   - Tree parser extracted {len(tree_form_fields)} field groups")
+                    except Exception as e:
+                        print(f"   - Tree parser error: {str(e)}")
+                        self.state.page_state["tree_form_fields"] = {}
                     
                     # Enhanced summary
                     summary = f"Page Snapshot Summary:\n"
@@ -276,14 +326,35 @@ class WebAgent:
         
         return {"messages": messages + results}
     
-    
-
     def route_from_planner(self, state: MessagesState):
         """Determine next state after planning."""
         messages = state["messages"]
         last_message = messages[-1]
 
-        # If we have page state, check for form indicators
+        # Enhanced form detection using tree parser results
+        if self.state.page_state and "tree_form_fields" in self.state.page_state:
+            tree_fields = self.state.page_state["tree_form_fields"]
+            
+            # Count different types of form fields
+            form_indicators = 0
+            total_fields = 0
+            
+            for field_group, fields in tree_fields.items():
+                for field in fields:
+                    total_fields += 1
+                    field_type = field.get('type', '')
+                    if field_type in ['textbox', 'combobox', 'checkbox', 'radio', 'spinbutton']:
+                        form_indicators += 1
+            
+            # If we have significant form content, route to filler
+            if total_fields >= 2 and form_indicators >= 1:
+                # Check if we're not already in a filling loop
+                recent_fill_attempts = len([m for m in messages[-3:] if isinstance(m, ToolMessage) and "browser_type" in str(m.content)])
+                if recent_fill_attempts < 3:  # Allow up to 3 consecutive fill attempts
+                    print(f"   - Routing to filler: {total_fields} total fields, {form_indicators} form fields")
+                    return "filler"
+        
+        # Fallback to original detection method if tree parser didn't find enough
         if self.state.page_state:
             form_indicators = 0
             
@@ -294,18 +365,24 @@ class WebAgent:
             
             # Check for common form field names
             common_fields = {"name", "email", "phone", "address", "password"}
-            field_matches = sum(1 for field in inputs if any(common in field.lower() for common in common_fields))
-            if field_matches >= 1:
+            field_matches = 0
+            for field in inputs:
+                if not isinstance(field, str):
+                    continue
+                f_lower = field.lower()
+                if any(common in f_lower for common in common_fields):
+                    field_matches += 1
+            if field_matches >= 2:  # Increased from 1 to 2
                 form_indicators += 1
             
             # Check for required fields (marked with *)
-            required_fields = sum(1 for field in inputs if "*" in field)
+            required_fields = sum(1 for field in inputs if isinstance(field, str) and "*" in field)
             if required_fields > 0:
                 form_indicators += 1
                 
             # Check for submit/continue buttons along with inputs
             buttons = self.state.page_state.get("buttons", [])
-            submit_buttons = any(b.lower() in ["submit", "continue", "next", "apply"] for b in buttons)
+            submit_buttons = any(isinstance(b, str) and any(k in b.lower() for k in ["submit", "continue", "next", "apply"]) for b in buttons)
             if submit_buttons and inputs:
                 form_indicators += 1
             
@@ -320,233 +397,205 @@ class WebAgent:
         return "executor"
 
     def filler_node(self, state: MessagesState):
-        """Specialized node for filling forms with enhanced field handling."""
+        """Specialized node for filling forms using tree-parsed form fields."""
         messages = state["messages"]
         
-        # Create a form context with all the form fields, buttons, and their references
-        form_fields = []
-        interactive_buttons = []
-        submission_buttons = []
-        dropdowns = []
-        radio_groups = []
-        checkboxes = []
-        file_uploads = []
-        
-        if self.state.page_state:
-            # Get all element references
-            refs = self.state.page_state.get("refs", {})
+        # Use tree-parsed form fields if available
+        if self.state.page_state and "tree_form_fields" in self.state.page_state:
+            tree_form_fields = self.state.page_state["tree_form_fields"]
             
-            # Track which refs we've already added to avoid duplicates
-            added_refs = set()
+            # Build structured form context directly from tree parser results
+            form_context_parts = [
+                f"=== CURRENT PAGE ===\n{self.state.current_url}",
+                "\n=== PARSED FORM FIELDS (Tree Structure) ==="
+            ]
             
-            # 1. Process regular input fields
-            inputs = self.state.page_state.get("inputs", [])
-            for input_field in inputs:
-                field_refs = refs.get(input_field, [])
-                for ref in field_refs:
-                    if ref and ref not in added_refs:
-                        # Format field with clean structure
-                        field_lower = input_field.lower()
-                        field_type = "text"
-                        
-                        if any(kw in field_lower for kw in ["email", "e-mail"]):
-                            field_type = "email"
-                        elif any(kw in field_lower for kw in ["phone", "mobile", "telephone"]):
-                            field_type = "phone"
-                        elif any(kw in field_lower for kw in ["date", "calendar"]):
-                            field_type = "date"
-                        elif any(kw in field_lower for kw in ["pay", "salary", "money"]):
-                            field_type = "number"
-                            
-                        form_fields.append(f"- Text field, {input_field}, ref:{ref}, type:{field_type}")
-                        added_refs.add(ref)
+            # Convert tree fields to a structured format for the LLM
+            field_descriptions = []
+            submission_buttons = []
             
-            # 2. Process dropdowns/selects with their options - USE REF-BASED IDENTIFICATION
-            dropdowns_list = self.state.page_state.get("comboboxes", [])
-            for dropdown_id in dropdowns_list:
-                if dropdown_id.startswith("combobox_"):
-                    ref = dropdown_id.replace("combobox_", "")
-                    if ref and ref not in added_refs:
-                        # Get options from refs storage
-                        options_key = f"{dropdown_id}_options"
-                        options = refs.get(options_key, [])
-                        
-                        options_str = f", options:[{','.join(options)}]" if options else ""
-                        dropdowns.append(f"- Dropdown, ref:{ref}{options_str}, type:select")
-                        added_refs.add(ref)
-            
-            # 3. Process radio groups and radio buttons
-            radio_groups_list = self.state.page_state.get("radio_groups", [])
-            for radio in radio_groups_list:
-                radio_refs = refs.get(radio, [])
-                for ref in radio_refs:
-                    if ref and ref not in added_refs:
-                        # Check if this is a skill rating or yes/no question
-                        radio_lower = radio.lower()
-                        if any(skill in radio_lower for skill in ["microsoft", "communication", "seo", "skill"]):
-                            # This is a skill rating, find the rating options
-                            rating_options = ["1 out of 5", "2 out of 5", "3 out of 5", "4 out of 5", "5 out of 5"]
-                            radio_groups.append(f"- Skill rating, {radio}, ref:{ref}, options:[{','.join(rating_options)}], type:radio")
-                        elif "?" in radio:
-                            # This is a yes/no question
-                            radio_groups.append(f"- Yes/No question, {radio}, ref:{ref}, options:[Yes,No], type:radio")
+            for field_group_name, fields in tree_form_fields.items():
+                if not fields:  # Skip empty field groups
+                    continue
+                    
+                # Add field group header if it's not a generic name
+                if field_group_name not in ['textbox', 'button', 'combobox', 'checkbox', 'radio']:
+                    field_descriptions.append(f"\n--- {field_group_name} ---")
+                
+                for field in fields:
+                    field_type = field.get('type', 'unknown')
+                    ref = field.get('ref', 'no-ref')
+                    
+                    if field_type == 'textbox':
+                        placeholder = field.get('placeholder', '')
+                        placeholder_text = f", placeholder: '{placeholder}'" if placeholder else ""
+                        field_descriptions.append(f"- Text field '{field_group_name}', ref: {ref}, type: text{placeholder_text}")
+                    
+                    elif field_type == 'combobox':
+                        options = field.get('options', [])
+                        selected = field.get('selected', '')
+                        options_text = f", options: [{', '.join(options)}]" if options else ""
+                        selected_text = f", selected: '{selected}'" if selected else ""
+                        field_descriptions.append(f"- Dropdown '{field_group_name}', ref: {ref}, type: select{options_text}{selected_text}")
+                    
+                    elif field_type == 'radio':
+                        label = field.get('label', '')
+                        checked = field.get('checked', False)
+                        field_descriptions.append(f"- Radio option '{label}', ref: {ref}, type: radio, checked: {checked}")
+                    
+                    elif field_type == 'checkbox':
+                        checked = field.get('checked', False)
+                        field_descriptions.append(f"- Checkbox '{field_group_name}', ref: {ref}, type: checkbox, checked: {checked}")
+                    
+                    elif field_type == 'spinbutton':
+                        label = field.get('label', '')
+                        field_descriptions.append(f"- Number field '{field_group_name}', ref: {ref}, type: number")
+                    
+                    elif field_type == 'button':
+                        label = field.get('label', field_group_name)
+                        # Guard against non-string labels
+                        label_str = label if isinstance(label, str) else str(label)
+                        if any(keyword in label_str.lower() for keyword in ['submit', 'send', 'apply', 'continue', 'next', 'finish']):
+                            submission_buttons.append(f"- Submit button '{label}', ref: {ref}, type: button")
                         else:
-                            radio_groups.append(f"- Radio group, {radio}, ref:{ref}, type:radio")
-                        added_refs.add(ref)
+                            field_descriptions.append(f"- Button '{label}', ref: {ref}, type: button")
             
-            # 4. Process checkboxes
-            checkboxes_list = self.state.page_state.get("checkboxes", [])
-            for checkbox in checkboxes_list:
-                checkbox_refs = refs.get(checkbox, [])
-                for ref in checkbox_refs:
-                    if ref and ref not in added_refs:
-                        checkboxes.append(f"- Checkbox, {checkbox}, ref:{ref}, checked:false, type:checkbox")
-                        added_refs.add(ref)
+            # Add the structured fields to context
+            if field_descriptions:
+                form_context_parts.append("\n".join(field_descriptions))
+            
+            # Add submission buttons separately
+            if submission_buttons:
+                form_context_parts.append("\n=== SUBMISSION BUTTONS ===")
+                form_context_parts.append("\n".join(submission_buttons))
+            
+            # Add file upload information if needed
+            # file_uploads = self.state.page_state.get("file_uploads", [])
+            # if file_uploads:
+            #     form_context_parts.append("\n=== FILE UPLOADS (USE browser_file_upload TOOL) ===")
+            #     form_context_parts.append("File path: /Users/arhan/Desktop/clean-connection 2/sample.pdf")
+            #     for upload in file_uploads:
+            #         form_context_parts.append(f"- {upload}")
+            
+            page_context = "\n".join(form_context_parts)
+            
+            # Debug: Print the page context being sent to the LLM
+            print("\n" + "="*80)
+            print("TREE-PARSED FORM CONTEXT BEING SENT TO LLM:")
+            print("="*80)
+            print(page_context)
+            print("="*80 + "\n")
+        
+        else:
+            # Fallback to original form field extraction if tree parser failed
+            print("   - Tree form fields not available, using fallback method")
+            
+            # [Keep original form field extraction code as fallback]
+            form_fields = []
+            interactive_buttons = []
+            submission_buttons = []
+            dropdowns = []
+            radio_groups = []
+            checkboxes = []
+            file_uploads = []
+            
+            if self.state.page_state:
+                refs = self.state.page_state.get("refs", {})
+                buttons = self.state.page_state.get("buttons", [])
+                inputs = self.state.page_state.get("inputs", [])
+                comboboxes = self.state.page_state.get("comboboxes", [])
+                radio_labels = self.state.page_state.get("radio_groups", [])
+                checkbox_labels = self.state.page_state.get("checkboxes", [])
+                uploads = self.state.page_state.get("file_uploads", [])
 
-            # 5. Categorize buttons
-            buttons_list = self.state.page_state.get("buttons", [])
-            submission_keywords = ["submit", "next", "continue", "apply", "finish"]
-            interactive_keywords = ["add", "more", "upload", "browse", "choose", "select", "date"]
+                # Text inputs
+                for label in inputs:
+                    label_refs = refs.get(label, [])
+                    if not label_refs:
+                        # Try generic mapping: sometimes labels may be missing; skip if no ref
+                        continue
+                    ref = label_refs[0]
+                    form_fields.append(f"- Text field '{label}', ref: {ref}, type: text")
+
+                # Dropdowns / Comboboxes
+                for label in comboboxes:
+                    label_refs = refs.get(label, [])
+                    # support combobox_<ref> synthetic ids
+                    if not label_refs and label.startswith("combobox_"):
+                        label_refs = refs.get(label, [])
+                    if not label_refs:
+                        continue
+                    ref = label_refs[0]
+                    # try to find options if stored
+                    options_key = f"{label}_options"
+                    options = refs.get(options_key, [])
+                    options_text = f", options: [{', '.join(options)}]" if options else ""
+                    dropdowns.append(f"- Dropdown '{label}', ref: {ref}, type: select{options_text}")
+
+                # Radio groups/options
+                for label in radio_labels:
+                    label_refs = refs.get(label, [])
+                    if not label_refs:
+                        continue
+                    ref = label_refs[0]
+                    radio_groups.append(f"- Radio group '{label}', ref: {ref}")
+
+                # Checkboxes
+                for label in checkbox_labels:
+                    label_refs = refs.get(label, [])
+                    if not label_refs:
+                        continue
+                    ref = label_refs[0]
+                    checkboxes.append(f"- Checkbox '{label}', ref: {ref}, type: checkbox")
+
+                # Buttons
+                for label in buttons:
+                    label_refs = refs.get(label, [])
+                    ref_str = f", ref: {label_refs[0]}" if label_refs else ""
+                    item = f"- Button '{label}'{ref_str}, type: button"
+                    # Guard against non-string labels
+                    label_str = label if isinstance(label, str) else str(label)
+                    if any(k in label_str.lower() for k in ['submit','send','apply','continue','next','finish']):
+                        submission_buttons.append(item)
+                    else:
+                        interactive_buttons.append(item)
+
+                # File uploads
+                for upload in uploads:
+                    # uploads may be synthetic like file_upload_e12 with refs mapping
+                    label_refs = refs.get(upload, [])
+                    if not label_refs:
+                        continue
+                    ref = label_refs[0]
+                    file_uploads.append(f"- File upload '{upload}', ref: {ref}")
             
-            for button in buttons_list:
-                button_refs = refs.get(button, [])
-                for ref in button_refs:
-                    if ref and ref not in added_refs:
-                        button_lower = button.lower()
-                        if any(keyword in button_lower for keyword in submission_keywords):
-                            submission_buttons.append(f"- Submit button, '{button}', ref:{ref}, type:button")
-                        elif any(keyword in button_lower for keyword in interactive_keywords):
-                            interactive_buttons.append(f"- Action button, '{button}', ref:{ref}, type:button")
-                        else:
-                            interactive_buttons.append(f"- Button, '{button}', ref:{ref}, type:button")
-                        added_refs.add(ref)
-        
-        # 6. Process file uploads - ENHANCED WITH CLEAR LABELS AND TYPE
-        file_upload_list = self.state.page_state.get("file_uploads", [])
-        for file_upload_id in file_upload_list:
-            if file_upload_id.startswith("file_upload_"):
-                ref = file_upload_id.replace("file_upload_", "")
-                if ref and ref not in added_refs:
-                    # Try to find a descriptive label for this file upload
-                    file_label = "File Upload"
-                    # Look for labels that contain upload-related keywords
-                    for label, ref_list in refs.items():
-                        if ref in ref_list and any(kw in label.lower() for kw in ["upload", "file", "cv", "resume", "cover", "browse"]):
-                            file_label = label
-                            break
-                    
-                    # Also check the original file uploads list for context
-                    original_uploads = self.state.page_state.get("file_uploads_detailed", [])
-                    for upload in original_uploads:
-                        if f"ref:{ref}" in upload:
-                            # Extract label from the original upload entry
-                            label_match = re.search(r'file_upload: (.*?)(?:,|$)', upload)
-                            if label_match:
-                                file_label = label_match.group(1)
-                    
-                    file_uploads.append(f"- File upload, {file_label}, ref:{ref}, type:file")
-                    added_refs.add(ref)
-        
-        # Combine all fillable fields in a logical order
-        all_fillable = []
-        
-        # Add form fields in order of appearance if possible
-        if self.state.page_state and "snapshot_text" in self.state.page_state:
-            snapshot_lines = self.state.page_state["snapshot_text"].splitlines()
-            
-            # Track which elements we've already added
-            added_elements = set()
-            
-            # Process each line to maintain original order
-            for line in snapshot_lines:
-                # Check for text fields
-                for field in form_fields:
-                    if f"ref:{field.split('ref:')[-1].split(',')[0].strip()}" in line and field not in added_elements:
-                        all_fillable.append(field)
-                        added_elements.add(field)
-                        break
-                
-                # Check for dropdowns
-                for dropdown in dropdowns:
-                    if f"ref:{dropdown.split('ref:')[-1].split(',')[0].strip()}" in line and dropdown not in added_elements:
-                        all_fillable.append(dropdown)
-                        added_elements.add(dropdown)
-                        break
-                        
-                # Check for radio groups
-                for radio in radio_groups:
-                    if f"ref:{radio.split('ref:')[-1].split(',')[0].strip()}" in line and radio not in added_elements:
-                        all_fillable.append(radio)
-                        added_elements.add(radio)
-                        break
-                        
-                # Check for checkboxes
-                for checkbox in checkboxes:
-                    if f"ref:{checkbox.split('ref:')[-1].split(',')[0].strip()}" in line and checkbox not in added_elements:
-                        all_fillable.append(checkbox)
-                        added_elements.add(checkbox)
-                        break
-                        
-                # Check for interactive buttons that might reveal form fields
-                for button in interactive_buttons:
-                    if f"ref:{button.split('ref:')[-1].split(',')[0].strip()}" in line and button not in added_elements:
-                        all_fillable.append(button)
-                        added_elements.add(button)
-                        break
-                
-                # Check for file uploads
-                for file_upload in file_uploads:
-                    if f"ref:{file_upload.split('ref:')[-1].split(',')[0].strip()}" in line and file_upload not in added_elements:
-                        all_fillable.append(file_upload)
-                        added_elements.add(file_upload)
-                        break
-        
-        # If we couldn't determine order from snapshot, just combine all lists
-        if not all_fillable:
+            # Build context from fallback extraction
             all_fillable = form_fields + dropdowns + radio_groups + checkboxes + interactive_buttons + file_uploads
+            form_field_text = "\n".join(all_fillable) if all_fillable else "No form fields detected"
+            
+            context_parts = [
+                f"=== CURRENT PAGE ===\n{self.state.current_url}",
+                f"\n=== FILL_FIELDS (Fallback) ===\n{form_field_text}"
+            ]
+            
+            if submission_buttons:
+                context_parts.append("\n=== SUBMISSION BUTTONS ===\n" + "\n".join(submission_buttons))
+            
+            page_context = "\n".join(context_parts)
         
-        # Use the enhanced form field parser to get clean output
-        form_field_text = "\n".join(all_fillable)
-        clean_formatted_fields = form_field_text
-        
-        # Build the context parts
-        context_parts = [
-            f"=== CURRENT PAGE ===\n{self.state.current_url}",
-            f"\n=== FILL_FIELDS ===\n{clean_formatted_fields}"
-        ]
-        
-        # Add non-fillable buttons separately
-        if submission_buttons:
-            context_parts.append("\n=== SUBMISSION BUTTONS ===\n" + "\n".join(submission_buttons))
-        
-        # Add file upload areas if found - CLEARLY MARKED AS FILE TYPE
-        if file_uploads:
-            context_parts.append("\n=== FILE UPLOADS (USE browser_file_upload TOOL) ===")
-            context_parts.append("File path: /Users/arhan/Desktop/clean-connection 2/sample.pdf")
-            context_parts.append("\n".join(file_uploads))
-        
-        page_context = "\n".join(context_parts)
-        
-        # Debug: Print the page context being sent to the LLM
-        print("\n" + "="*80)
-        print("PAGE CONTEXT BEING SENT TO LLM:")
-        print("="*80)
-        print(page_context)
-        print("="*80 + "\n")
-        
-        # Use the updated prompt template with explicit file upload instructions
+        # Use the filler prompt template
         filler_prompt = FILLER_PROMPT_TEMPLATE.format(page_context=page_context)
         
         # Create a proper message sequence for the LLM
         filler_messages = [
             SystemMessage(content=filler_prompt),
-            HumanMessage(content="Please fill out this form with appropriate dummy data. Remember to use browser_file_upload for any file upload fields!"),
+            HumanMessage(content="Please fill out this form with appropriate dummy data. Use the ref values provided to target the correct elements."),
         ]
 
         try:
             response = self.llm.invoke(filler_messages)
             if not response.content:
-                response.content = "Planning to fill out the form fields including file uploads."
+                response.content = "Planning to fill out the form fields using tree-parsed structure."
             return {"messages": messages + [response]}
         except Exception as e:
             error_msg = f"Error in filler node: {str(e)}"
@@ -555,7 +604,6 @@ class WebAgent:
     def route_after_execution(self, state: MessagesState):
         """Route after tool execution back to planner."""
         return "planner"
-
 
     async def run(self, goal: str):
         """Run the agent with the given goal."""

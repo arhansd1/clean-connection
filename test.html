@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Survey Page</title>
+  <style>
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      font-family: Arial, sans-serif;
+      background-color: #f4f4f4;
+    }
+    .container {
+      background: white;
+      padding: 20px 40px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      text-align: left;
+    }
+    .question {
+      margin: 15px 0;
+    }
+    label {
+      margin-left: 8px;
+    }
+    .radio-group {
+      margin: 8px 0 0 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>Quick Survey</h2>
+
+    <!-- Checkboxes -->
+    <div class="question">
+      <input type="checkbox" id="q1"><label for="q1">Are you above 15 years?</label>
+    </div>
+    <div class="question">
+      <input type="checkbox" id="q2"><label for="q2">Are you from India?</label>
+    </div>
+    <div class="question">
+      <input type="checkbox" id="q3"><label for="q3">Are you earning?</label>
+    </div>
+    <div class="question">
+      <input type="checkbox" id="q4"><label for="q4">Are you from Delhi?</label>
+    </div>
+    <div class="question">
+      <input type="checkbox" id="q5"><label for="q5">Are you drunk?</label>
+    </div>
+
+    <hr>
+
+    <!-- Radio button groups -->
+    <div class="question">
+      Do you drink?
+      <div class="radio-group">
+        <input type="radio" name="drink" id="drinkYes" value="yes"><label for="drinkYes">Yes</label>
+        <input type="radio" name="drink" id="drinkNo" value="no"><label for="drinkNo">No</label>
+      </div>
+    </div>
+
+    <div class="question">
+      Are you happy?
+      <div class="radio-group">
+        <input type="radio" name="happy" id="happyYes" value="yes"><label for="happyYes">Yes</label>
+        <input type="radio" name="happy" id="happyNo" value="no"><label for="happyNo">No</label>
+      </div>
+    </div>
+
+    <div class="question">
+      Do you like your job?
+      <div class="radio-group">
+        <input type="radio" name="job" id="jobYes" value="yes"><label for="jobYes">Yes</label>
+        <input type="radio" name="job" id="jobNo" value="no"><label for="jobNo">No</label>
+      </div>
+    </div>
+
+    <div class="question">
+      Do you think you deserve to be paid more?
+      <div class="radio-group">
+        <input type="radio" name="paid" id="paidYes" value="yes"><label for="paidYes">Yes</label>
+        <input type="radio" name="paid" id="paidNo" value="no"><label for="paidNo">No</label>
+      </div>
+    </div>
+
+    <div class="question">
+      Do you believe in the Illuminati?
+      <div class="radio-group">
+        <input type="radio" name="illuminati" id="illuYes" value="yes"><label for="illuYes">Yes</label>
+        <input type="radio" name="illuminati" id="illuNo" value="no"><label for="illuNo">No</label>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

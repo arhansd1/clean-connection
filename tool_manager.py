@@ -321,7 +321,11 @@ def truncate(text: str, limit: int = 400) -> str:
 
 
 def extract_counts(snapshot: str) -> Dict[str, int]:
-    lower = snapshot.lower()
+    # Coerce to string to avoid NoneType errors
+    lower = (snapshot or "")
+    if not isinstance(lower, str):
+        lower = str(lower)
+    lower = lower.lower()
     counts = {}
     counts["buttons"] = lower.count(" button ")
     counts["inputs"] = sum(lower.count(k) for k in [" textbox ", " input ", " combobox ", " textarea "])
