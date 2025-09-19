@@ -11,10 +11,15 @@ from agent_core import WebAgent
 from tool_manager import ToolManager
 from utils import analyze_goal
 
-import os
-os.environ["GOOGLE_API_KEY"] = "AIzaSyDJMNXFV6k6DbZlb-Z-mfEynssltlGnfFA"  # Replace with your actual API key
-#AIzaSyA1S0_PviUC6e9gSzfXNNIu16LsODM_O0E
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Get Google API key from environment variables
 google_key = os.getenv("GOOGLE_API_KEY")
+if not google_key:
+    raise ValueError("GOOGLE_API_KEY not found in environment variables. Please create a .env file with your Google API key.")
 
 
 async def run_automation(goal: str, config: Optional[Dict[str, Any]] = None):
