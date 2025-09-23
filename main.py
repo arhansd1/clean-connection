@@ -22,6 +22,52 @@ if not google_key:
     raise ValueError("GOOGLE_API_KEY not found in environment variables. Please create a .env file with your Google API key.")
 
 
+# Enhanced user data with field variations and file paths
+user_data = {
+    # Name variations
+    ('first_name', 'firstname', 'fname', 'given_name', 'name_first'): "John",
+    ('last_name', 'lastname', 'lname', 'surname', 'family_name', 'name_last'): "Doe", 
+    ('middle_name', 'middlename', 'mname', 'middle_initial', 'mi'): "M",
+    ('full_name', 'name', 'fullname', 'complete_name', 'your_name'): "John M. Doe",
+
+    #Basic info 
+    ('Gender', 'gender', 'sex', 'gender_identity', 'gender_preference'): "Male",
+    ('Age', 'age', 'age_in_years', 'age_in_months', 'age_in_days'): "25",
+    ('Birth Date', 'birth_date', 'dob', 'date_of_birth', 'dob'): "20/10/2004",
+    ('Marital Status', 'marital_status', 'marital_status', 'marital_status', 'marital_status'): "Single",
+    ('Nationality', 'nationality', 'nationality', 'nationality', 'nationality'): "American",
+    
+    # Contact information
+    ('email', 'email_address', 'mail', 'e_mail', 'contact_email'): "john.doe@example.com",
+    ('Home Phone', 'home_phone', 'home_number', 'home_telephone', 'home_cell'): "+1-550-331-0000",
+    ('phone', 'phone_number', 'mobile', 'contact_number', 'telephone', 'cell'): "+1-555-123-4567",
+    ('address', 'street_address', 'home_address', 'mailing_address'): "123 Main Street",
+    ('city', 'town', 'locality'): "New York",
+    ('state', 'province', 'region'): "NY",
+    ('zip', 'zipcode', 'postal_code', 'postcode'): "10001",
+    ('country', 'nationality'): "USA",
+    
+    # Professional information
+    ('position', 'job_title', 'role', 'title', 'desired_position'): "Software Engineer",
+    ('company', 'current_company', 'employer', 'organization'): "Tech Corp Inc.",
+    ('experience', 'years_experience', 'work_experience'): "5",
+    ('salary', 'expected_salary', 'salary_expectation', 'compensation'): "75000",
+    ('start_date', 'available_date', 'join_date'): "2025-01-01",
+    
+    # Education
+    ('education', 'degree', 'qualification', 'university', 'college'): "Bachelor of Science in Computer Science",
+    ('graduation_year', 'grad_year', 'year_graduated'): "2020",
+    
+    # Additional fields
+    ('linkedin', 'linkedin_profile', 'linkedin_url'): "https://linkedin.com/in/johndoe",
+    ('website', 'portfolio', 'personal_website'): "https://johndoe.dev",
+    ('cover_letter', 'message', 'why_interested', 'motivation'): "I am excited to apply for this position and contribute to your team with my skills and experience.",
+    
+    # File uploads
+    ('resume', 'cv', 'cv_upload', 'resume_upload', 'file_upload'): "/Users/arhan/Desktop/clean-connection 2/sample.pdf",
+    ('portfolio_file', 'documents', 'attachment'): "/Users/arhan/Desktop/clean-connection 2/sample.pdf",
+}
+
 async def run_automation(goal: str, config: Optional[Dict[str, Any]] = None):
     """Run web automation with the given goal."""
     config = config or {}
@@ -49,7 +95,7 @@ async def run_automation(goal: str, config: Optional[Dict[str, Any]] = None):
                 raise ValueError("Missing Google API key. Set GOOGLE_API_KEY environment variable.")
                 
             # Initialize LLM
-            model_name = config.get("model_name") or os.getenv("MODEL_NAME", "gemini-2.5-flash")
+            model_name = config.get("model_name") or os.getenv("MODEL_NAME", "gemini-2.5-flash-lite")
             llm = ChatGoogleGenerativeAI(
                 model=model_name,
                 google_api_key=api_key,
@@ -57,7 +103,7 @@ async def run_automation(goal: str, config: Optional[Dict[str, Any]] = None):
             ).bind_tools(tool_manager.tools)
             
             # Create and run agent
-            agent = WebAgent(llm, tool_manager)
+            agent = WebAgent(llm, tool_manager, user_data)
             
             # Analyze goal for better context
             goal_analysis = analyze_goal(goal)
@@ -65,13 +111,12 @@ async def run_automation(goal: str, config: Optional[Dict[str, Any]] = None):
             
             # Run the agent
             print(f"🤖 Starting automation for goal: {goal}")
-    #        messages = await agent.run(goal)
            
             try:
                 # Run the agent with just the goal parameter
                 messages = await agent.run(goal)
             except asyncio.TimeoutError:
-                print("❌ Agent run timed out!")
+                print("⌛ Agent run timed out!")
                 return []
             except Exception as e:
                 print(f"❌ Agent run failed: {str(e)}")
@@ -101,7 +146,7 @@ async def main():
    
     # Default goal if none provided
     goal = "".join(args.goal) if args.goal else (
-        "Navigate to https://careers-marzetti.icims.com/jobs/7332/qa-analyst-i/candidate?from=login&eem=_jtH0TjR1USwVQ6qenUs0o6StwCq1R_oQC3HR0jVRim4Y3dEQpUwveBuZxAUxn6i&code=cd8cd0a2fd31388819ecf18ef03d51140a270553133c996c4182003a4db7319b&ga=4bdc429a4721fe04e21846f05e14f7e6f5441839e3098c4c42223e72dc3b044e&accept_gdpr=1 , get all the job query form fields and fill them with dummy data and submit the form. "
+        "Navigate to http://127.0.0.1:5500/test2.html , get all the job query form fields and fill them with dummy data and submit the form. "
     )
 
     config = {

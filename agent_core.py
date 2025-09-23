@@ -37,10 +37,73 @@ class AgentState:
 class WebAgent:
     """Intelligent web automation agent."""
     
-    def __init__(self, llm, tool_manager: ToolManager):
+    def __init__(self, llm, tool_manager: ToolManager, user_data: Dict = None):
         self.llm = llm
         self.tool_manager = tool_manager
         self.state = AgentState()
+        self.user_data = user_data or {}
+
+    def _find_matching_user_data(self, field_label: str) -> Optional[str]:
+        """Find matching user data for a given field label using fuzzy matching."""
+        if not field_label or not self.user_data:
+            return None
+        
+        # Normalize the field label
+        field_lower = field_label.lower().strip()
+        
+        # Remove common prefixes and suffixes
+        for prefix in ['your_', 'enter_', 'please_', 'input_']:
+            if field_lower.startswith(prefix):
+                field_lower = field_lower[len(prefix):]
+        
+        for suffix in ['_here', '_field', '_input']:
+            if field_lower.endswith(suffix):
+                field_lower = field_lower[:-len(suffix)]
+        
+        # Clean up special characters and spaces
+        field_clean = field_lower.replace('_', '').replace('-', '').replace(' ', '').replace('*', '')
+        
+        # Look for exact matches or partial matches
+        for field_keys, value in self.user_data.items():
+            if isinstance(field_keys, tuple):
+                for key in field_keys:
+                    key_clean = key.lower().replace('_', '').replace('-', '').replace(' ', '')
+                    if key_clean == field_clean or key_clean in field_clean or field_clean in key_clean:
+                        return value
+            else:
+                # Handle legacy format
+                key_clean = field_keys.lower().replace('_', '').replace('-', '').replace(' ', '')
+                if key_clean == field_clean or key_clean in field_clean or field_clean in key_clean:
+                    return value
+        
+        return None
+
+    def _build_user_data_context(self) -> str:
+        """Build a readable context string from user data for the LLM."""
+        if not self.user_data:
+            return "No user data available. Skip fields that cannot be filled."
+        
+        context_lines = ["=== AVAILABLE USER DATA ==="]
+        
+        for field_keys, value in self.user_data.items():
+            if isinstance(field_keys, tuple):
+                primary_key = field_keys[0]
+                alternatives = ', '.join(field_keys[1:3])  # Show first few alternatives
+                context_lines.append(f"- {primary_key} (also matches: {alternatives}): '{value}'")
+            else:
+                context_lines.append(f"- {field_keys}: '{value}'")
+        
+        context_lines.extend([
+            "",
+            "INSTRUCTIONS FOR FIELD MATCHING:",
+            "- Match form field labels to the most appropriate user data above",
+            "- Use fuzzy matching (ignore case, underscores, spaces, special characters)",
+            "- For file uploads, use the provided file paths",
+            "- If no matching data exists for a field, skip that field unless it's clearly required",
+            "- For required fields without data, use reasonable defaults or leave empty"
+        ])
+        
+        return "\n".join(context_lines)
 
     def build_workflow(self):
         """Construct the agent workflow graph."""
@@ -397,8 +460,11 @@ class WebAgent:
         return "executor"
 
     def filler_node(self, state: MessagesState):
-        """Specialized node for filling forms using tree-parsed form fields."""
+        """Specialized node for filling forms using user data and tree-parsed form fields."""
         messages = state["messages"]
+        
+        # Build user data context for the LLM
+        user_data_context = self._build_user_data_context()
         
         # Use tree-parsed form fields if available
         if self.state.page_state and "tree_form_fields" in self.state.page_state:
@@ -575,7 +641,7 @@ class WebAgent:
             
             context_parts = [
                 f"=== CURRENT PAGE ===\n{self.state.current_url}",
-                f"\n=== FILL_FIELDS (Fallback) ===\n{form_field_text}"
+                f"\n=== FILLABLE FIELDS (Fallback) ===\n{form_field_text}"
             ]
             
             if submission_buttons:
@@ -583,27 +649,27 @@ class WebAgent:
             
             page_context = "\n".join(context_parts)
         
+        # Combine user data context with page context
+        combined_context = f"{user_data_context}\n\n{page_context}"
+        
         # Use the filler prompt template
-        filler_prompt = FILLER_PROMPT_TEMPLATE.format(page_context=page_context)
+        filler_prompt = FILLER_PROMPT_TEMPLATE.format(page_context=combined_context)
         
         # Create a proper message sequence for the LLM
         filler_messages = [
             SystemMessage(content=filler_prompt),
-            HumanMessage(content="Please fill out this form with appropriate dummy data. Use the ref values provided to target the correct elements."),
+            HumanMessage(content="Please fill out this form by matching field labels to the available user data. Use the ref values provided to target the correct elements. Skip fields that don't have matching user data unless they're clearly required."),
         ]
 
         try:
             response = self.llm.invoke(filler_messages)
             if not response.content:
-                response.content = "Planning to fill out the form fields using tree-parsed structure."
+                response.content = "Planning to fill out the form fields using available user data."
             return {"messages": messages + [response]}
         except Exception as e:
             error_msg = f"Error in filler node: {str(e)}"
             return {"messages": messages + [AIMessage(content=error_msg)]}
 
-    def route_after_execution(self, state: MessagesState):
-        """Route after tool execution back to planner."""
-        return "planner"
 
     async def run(self, goal: str):
         """Run the agent with the given goal."""
