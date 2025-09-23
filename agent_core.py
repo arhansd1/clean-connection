@@ -11,12 +11,13 @@ from langgraph.graph import START
 from langgraph.graph import MessagesState
 
 from tool_manager import ToolManager
-from utils import extract_interactive_elements, truncate_text, find_element_ref, analyze_goal, extract_form_fields, _is_interactive_line, parse_form_fields_enhanced
+from utils import extract_interactive_elements, truncate_text, find_element_ref, parse_form_fields_enhanced
 from prompts import SYSTEM_PROMPT_TEMPLATE, FILLER_PROMPT_TEMPLATE
 
 import base64
 import os
 from pathlib import Path
+import re
 
 @dataclass
 class AgentState:
@@ -94,9 +95,12 @@ class WebAgent:
                 for label, rlist in list(refs.items())[:5]:
                     ref_items.append(f"'{label}': {','.join(rlist)}")
                 page_summary += f"Element refs: {', '.join(ref_items)}\n"
+########
+        raw_fields = self.state.page_state.get("raw_fields", {})
+        #print("raw_fields:", json.dumps(raw_fields, indent=2))
 
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
-            page_context=page_summary,
+            page_context=raw_fields,
             step_count=f"{self.state.step_count}/{self.state.max_steps}"
         )
         prepared.append(SystemMessage(content=system_prompt))
@@ -128,9 +132,24 @@ class WebAgent:
         try:
             # Prepare a structured sequence of messages
             invoke_messages = self._prepare_invoke_messages(messages, keep_last=5)
+            raw_fields = {}
+            if self.state.page_state:
+                # Add page state into invoke_messages for context
+                raw_fields = self.state.page_state.get("raw_fields", {})
+
+                # human message with page context
+            final_messages = invoke_messages + [HumanMessage(content=f"=== PAGE CONTEXT ===\n{raw_fields}")]
 
             # Call LLM with structured messages
-            response = self.llm.invoke(invoke_messages)
+
+            
+            if not raw_fields:
+                response = self.llm.invoke(invoke_messages)
+            else:
+                response = self.llm.invoke(final_messages)
+
+
+            
 
             # If LLM returned tool calls but no content, add descriptive content
             if hasattr(response, "tool_calls") and response.tool_calls and not getattr(response, "content", None):
@@ -138,7 +157,7 @@ class WebAgent:
                 response.content = f"Planning next steps: {tools_desc}"
 
             self.state.step_count += 1
-            print(response)
+            #print(response)
             # Add both the rebuilt system prompt and response to history
             return {"messages": messages + [response]}
 
@@ -149,9 +168,12 @@ class WebAgent:
     
     async def executor_node(self, state: MessagesState):
         """Execute tools called by the planner."""
+
+        #Extracts the last message (which should contain tool calls)
         messages = state["messages"]
         last_message = messages[-1]
         results = []
+        
         
         # Track consecutive failures of the same type
         recent_errors = [msg for msg in messages[-3:] if isinstance(msg, ToolMessage) and "Error executing" in msg.content]
@@ -166,33 +188,101 @@ class WebAgent:
             print(f"\n Executing tool: {tool_name}")
             print(f"   - Arguments: {tool_args}")
             print(f"   - Call ID: {tool_id}")
-            
+
+
+
             # Handle click operations
             if tool_name == "browser_click":
-                # Always try to find the element in the latest snapshot
                 if self.state.page_state and "snapshot_text" in self.state.page_state:
-                    # Get element text, trying different possible keys
-                    element_text = tool_args.get("element") or tool_args.get("selector", "") or tool_args.get("ref", "")
-                    
+                    element_text = (
+                        tool_args.get("element")
+                        or tool_args.get("selector", "")
+                        or tool_args.get("ref", "")
+                    )
+
                     # If we only have a ref, try to find its text from page state
-                    if element_text.startswith("e") and "refs" in self.state.page_state:
+                    if str(element_text).startswith("e") and "refs" in self.state.page_state:
                         for label, refs in self.state.page_state.get("refs", {}).items():
                             if element_text in refs:
                                 element_text = label
                                 break
-                    
+
                     # Try to find ref
                     new_ref = find_element_ref(
-                        self.state.page_state["snapshot_text"], 
+                        self.state.page_state["snapshot_text"],
                         element_text,
-                        tool_args.get("element_type", "button")
+                        tool_args.get("element_type", "button"),
                     )
-                    
+
                     if new_ref:
-                        # Use both element and ref for better reliability
                         tool_args["ref"] = new_ref
                         tool_args["element"] = element_text
-                
+
+                        # 🔎 Detect checkboxes or radios
+                        checkboxes = self.state.page_state.get("checkboxes", [])
+                        radios = self.state.page_state.get("radio_groups", [])
+
+                        is_checkbox = any(new_ref in self.state.page_state["refs"].get(cb, []) for cb in checkboxes)
+                        is_radio = any(new_ref in self.state.page_state["refs"].get(rg, []) for rg in radios)
+
+                        if is_checkbox or is_radio:
+                            tool_args["force_check"] = True  # mark for Playwright `.check()` instead of `.click()`
+
+
+            
+            # # Handle click operations
+            # if tool_name == "browser_click":
+            #     # Always try to find the element in the latest snapshot
+            #     if self.state.page_state and "snapshot_text" in self.state.page_state:
+            #         # Get element text, trying different possible keys
+            #         element_text = tool_args.get("element") or tool_args.get("selector", "") or tool_args.get("ref", "")
+                    
+            #         # If we only have a ref, try to find its text from page state
+            #         if element_text.startswith("e") and "refs" in self.state.page_state:
+            #             for label, refs in self.state.page_state.get("refs", {}).items():
+            #                 if element_text in refs:
+            #                     element_text = label
+            #                     break
+                    
+            #         # Try to find ref
+            #         new_ref = find_element_ref(
+            #             self.state.page_state["snapshot_text"], 
+            #             element_text,
+            #             tool_args.get("element_type", "button")
+            #         )
+                    
+            #         if new_ref:
+            #             # Use both element and ref for better reliability
+            #             tool_args["ref"] = new_ref
+            #             tool_args["element"] = element_text
+
+
+                    # Handle Yes/No with context
+                    # if element_text.lower() in ["yes", "no"]:
+                    #     question_text = tool_args.get("question")  # <- add question context if available
+                    #     refs_dict = self.state.page_state.get("refs", {})
+
+                    #     for q_text, options in refs_dict.items():
+                    #         if question_text and question_text.lower() in q_text.lower():
+                    #             for opt in options:
+                    #                 if opt["label"].lower() == element_text.lower():
+                    #                     tool_args["ref"] = opt["ref"]
+                    #                     tool_args["element"] = element_text
+                    #                     break
+                    #             break
+
+                    # else:
+                    #     # Fallback for other buttons
+                    #     new_ref = find_element_ref(
+                    #         self.state.page_state["snapshot_text"],
+                    #         element_text,
+                    #         tool_args.get("element_type", "button")
+                    #     )
+                    #     if new_ref:
+                    #         tool_args["ref"] = new_ref
+                    #         tool_args["element"] = element_text
+
+
             # Handle navigation
             if tool_name == "browser_navigate" and "url" in tool_args:
                 url = tool_args["url"]
@@ -217,7 +307,13 @@ class WebAgent:
                         else:
                             # Flatten the kwargs structure
                             tool_args = tool_args["kwargs"]
-                
+
+
+                            
+                if tool_name == "browser_type":
+                    if "value" in tool_args and "text" not in tool_args:
+                        tool_args["text"] = tool_args.pop("value")
+
                 # Ensure both element and ref are present for relevant tools
                 if tool_name in ["browser_type", "browser_click", "browser_select_option"]:
                     # If we have ref but no element, try to find the element from page state
@@ -227,15 +323,22 @@ class WebAgent:
                                 if tool_args["ref"] in refs:
                                     tool_args["element"] = element
                                     break
-                
+
+                                # Normalize args for browser_fill_form to the expected shape
+                if tool_name == "browser_fill_form":
+                    if isinstance(tool_args, dict) and "fields" not in tool_args:
+                        #tool_args = {"fields": [{"name": k, "value": v} for k, v in tool_args.items()]}
+                        tool_args = {k: v for k, v in tool_args.items()}
+            
+
                 # Print raw metadata before execution
-                print(f"\n[TOOL_METADATA] name={tool_name} args={tool_args} call_id={tool_id}")
+                #print(f"\n[TOOL_METADATA] name={tool_name} args={tool_args} call_id={tool_id}")
                 
                 try:
-                    result = await self.tool_manager.execute_tool(tool_name, tool_args)
-                    print(f"   - {tool_name} executed successfully")
-                except Exception as e:
-                    print(f"   - Error executing {tool_name}: {str(e)}")
+                    result = await self.tool_manager.execute_tool(tool_name, tool_args)     
+                    print(f"   - {tool_name} executed successfully")                        
+                except Exception as e:                                                      
+                    print(f"   - Error executing {tool_name}: {str(e)}")                    
                     raise
                 
                 # Special handling for snapshot
@@ -259,13 +362,14 @@ class WebAgent:
                                 ref_str = f" (ref: {refs[0]})" if refs else ""
                                 elements_with_refs.append(f'"{element}"{ref_str}')
                             summary += f"{element_type.capitalize()}: {', '.join(elements_with_refs)}\n"
-                    
+
                     print(f"   - Snapshot summary generated")
                     print(f"   - Title: {page_elements.get('title', 'Unknown')}")
                     buttons = page_elements.get('buttons', [])
                     print(f"   - Buttons ({len(buttons)}): {', '.join(buttons[:5])}" + ("..." if len(buttons) > 5 else ""))
                     print(f"   - Inputs: {len(page_elements.get('inputs', []))}")
-                    results.append(ToolMessage(content=summary, tool_call_id=tool_id))
+                    print(summary)
+                    results.append(ToolMessage(content=page_elements, tool_call_id=tool_id))
                 else:
                     result_str = truncate_text(str(result), 2000)
                     print(f"   - Tool result: {result_str[:200]}..." if len(result_str) > 200 else f"   - Tool result: {result_str}")
@@ -281,6 +385,11 @@ class WebAgent:
         return {"messages": messages + results}
     
     
+    # for tool_call in getattr(last_message, "tool_calls", []) or []:
+    #     tool_name = tool_call.get("name")
+    #     tool_args = tool_call.get("args",[])
+               
+
 
     def route_from_planner(self, state: MessagesState):
         """Determine next state after planning."""
@@ -362,8 +471,17 @@ class WebAgent:
                         elif any(kw in field_lower for kw in ["pay", "salary", "money"]):
                             field_type = "number"
                             
-                        form_fields.append(f"- Text field, {input_field}, ref:{ref}, type:{field_type}")
+                        # form_fields.append({
+                        #     "label": input_field,
+                        #     "ref": ref,
+                        #     "type": field_type,   # e.g. "textbox", "checkbox"
+                        #     "value": None         # placeholder, fill later
+                        # })
+                        # added_refs.add(ref)
+
+                        form_fields.append(f"- Text field, {input_field}, ref:{ref}, type:{field_type}, value:''")
                         added_refs.add(ref)
+
             
             # 2. Process dropdowns/selects with their options - USE REF-BASED IDENTIFICATION
             dropdowns_list = self.state.page_state.get("comboboxes", [])
@@ -378,7 +496,7 @@ class WebAgent:
                         options_str = f", options:[{','.join(options)}]" if options else ""
                         dropdowns.append(f"- Dropdown, ref:{ref}{options_str}, type:select")
                         added_refs.add(ref)
-            
+            #### ####
             # 3. Process radio groups and radio buttons
             radio_groups_list = self.state.page_state.get("radio_groups", [])
             for radio in radio_groups_list:
@@ -390,7 +508,7 @@ class WebAgent:
                         if any(skill in radio_lower for skill in ["microsoft", "communication", "seo", "skill"]):
                             # This is a skill rating, find the rating options
                             rating_options = ["1 out of 5", "2 out of 5", "3 out of 5", "4 out of 5", "5 out of 5"]
-                            radio_groups.append(f"- Skill rating, {radio}, ref:{ref}, options:[{','.join(rating_options)}], type:radio")
+                            radio_groups.append(f"- Skill rating, ref:{ref}, options:[{','.join(rating_options)}], type:radio")
                         elif "?" in radio:
                             # This is a yes/no question
                             radio_groups.append(f"- Yes/No question, {radio}, ref:{ref}, options:[Yes,No], type:radio")
@@ -465,42 +583,48 @@ class WebAgent:
             for line in snapshot_lines:
                 # Check for text fields
                 for field in form_fields:
-                    if f"ref:{field.split('ref:')[-1].split(',')[0].strip()}" in line and field not in added_elements:
+                    ref = field["ref"] if isinstance(field, dict) else field.split('ref:')[-1].split(',')[0].strip()
+                    if f"ref:{ref}" in line and field not in added_elements:
                         all_fillable.append(field)
                         added_elements.add(field)
                         break
-                
+
                 # Check for dropdowns
                 for dropdown in dropdowns:
-                    if f"ref:{dropdown.split('ref:')[-1].split(',')[0].strip()}" in line and dropdown not in added_elements:
+                    ref = dropdown["ref"] if isinstance(dropdown, dict) else dropdown.split('ref:')[-1].split(',')[0].strip()
+                    if f"ref:{ref}" in line and dropdown not in added_elements:
                         all_fillable.append(dropdown)
                         added_elements.add(dropdown)
                         break
-                        
+
                 # Check for radio groups
                 for radio in radio_groups:
-                    if f"ref:{radio.split('ref:')[-1].split(',')[0].strip()}" in line and radio not in added_elements:
+                    ref = radio["ref"] if isinstance(radio, dict) else radio.split('ref:')[-1].split(',')[0].strip()
+                    if f"ref:{ref}" in line and radio not in added_elements:
                         all_fillable.append(radio)
                         added_elements.add(radio)
                         break
-                        
+
                 # Check for checkboxes
                 for checkbox in checkboxes:
-                    if f"ref:{checkbox.split('ref:')[-1].split(',')[0].strip()}" in line and checkbox not in added_elements:
+                    ref = checkbox["ref"] if isinstance(checkbox, dict) else checkbox.split('ref:')[-1].split(',')[0].strip()
+                    if f"ref:{ref}" in line and checkbox not in added_elements:
                         all_fillable.append(checkbox)
                         added_elements.add(checkbox)
                         break
-                        
+
                 # Check for interactive buttons that might reveal form fields
                 for button in interactive_buttons:
-                    if f"ref:{button.split('ref:')[-1].split(',')[0].strip()}" in line and button not in added_elements:
+                    ref = button["ref"] if isinstance(button, dict) else button.split('ref:')[-1].split(',')[0].strip()
+                    if f"ref:{ref}" in line and button not in added_elements:
                         all_fillable.append(button)
                         added_elements.add(button)
                         break
-                
+
                 # Check for file uploads
                 for file_upload in file_uploads:
-                    if f"ref:{file_upload.split('ref:')[-1].split(',')[0].strip()}" in line and file_upload not in added_elements:
+                    ref = file_upload["ref"] if isinstance(file_upload, dict) else file_upload.split('ref:')[-1].split(',')[0].strip()
+                    if f"ref:{ref}" in line and file_upload not in added_elements:
                         all_fillable.append(file_upload)
                         added_elements.add(file_upload)
                         break
@@ -526,20 +650,23 @@ class WebAgent:
         # Add file upload areas if found - CLEARLY MARKED AS FILE TYPE
         if file_uploads:
             context_parts.append("\n=== FILE UPLOADS (USE browser_file_upload TOOL) ===")
-            context_parts.append("File path: /Users/arhan/Desktop/clean-connection 2/sample.pdf")
+            context_parts.append("File path: /Users/dineshk/Downloads/clean-connection-2/sample.pdf")
             context_parts.append("\n".join(file_uploads))
         
         page_context = "\n".join(context_parts)
         
+        raw_fields = self.state.page_state.get("raw_fields", {})
+        #print("raw_fields:", json.dumps(raw_fields, indent=2))
+
         # Debug: Print the page context being sent to the LLM
         print("\n" + "="*80)
         print("PAGE CONTEXT BEING SENT TO LLM:")
         print("="*80)
-        print(page_context)
+        print(raw_fields)
         print("="*80 + "\n")
         
         # Use the updated prompt template with explicit file upload instructions
-        filler_prompt = FILLER_PROMPT_TEMPLATE.format(page_context=page_context)
+        filler_prompt = FILLER_PROMPT_TEMPLATE.format(page_context=raw_fields)
         
         # Create a proper message sequence for the LLM
         filler_messages = [
@@ -551,10 +678,22 @@ class WebAgent:
             response = self.llm.invoke(filler_messages)
             if not response.content:
                 response.content = "Planning to fill out the form fields including file uploads."
+
+            # 🔹 If the LLM returned a plain dict of label->value, wrap it
+            #     into the shape the tool expects later (best-effort).
+
+            if isinstance(response.content, dict) and "fields" not in response.content:
+                structured_fields = [{"name": k, "value": v} for k, v in response.content.items()]
+                response.content = {"fields": structured_fields}
+
+
             return {"messages": messages + [response]}
+
         except Exception as e:
             error_msg = f"Error in filler node: {str(e)}"
             return {"messages": messages + [AIMessage(content=error_msg)]}
+
+
 
     def route_after_execution(self, state: MessagesState):
         """Route after tool execution back to planner."""

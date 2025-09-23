@@ -366,426 +366,423 @@ def _normalize_snapshot_lines(snapshot_text: Any) -> List[str]:
         raw_lines = [repr(snapshot_text)]
     return [_to_str(l) for l in raw_lines]
 
+import re, json
+from collections import OrderedDict
 
-def extract_interactive_elements(snapshot_text: Any) -> Dict[str, Any]:
-    print("\nSNAPSHOT TEXT", snapshot_text, "\n")
-    lines = _normalize_snapshot_lines(snapshot_text)
-    result = {
-        "title": None,
-        "headings": [],
-        "buttons": [],
-        "inputs": [],
-        "links": [],
-        "tabs": [],
-        "refs": {},
-        "dropdowns":[],
-        "interactives": [],
-        "all_clickables": [],
-        "form_sections": [],
-        "file_uploads": [],
-        "radio_groups": [],
-        "comboboxes": [],
-        "date_fields": [],
-        "checkboxes": []
-    }
-    
-    ref_pattern = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")  # Updated to handle iframe refs like f1e2
-    quoted_pattern = re.compile(r'"([^\"]+)"')
-    icon_pattern = re.compile(r'<svg[^>]*>.*?</svg>|<i[^>]*>.*?</i>|<img[^>]*>', re.DOTALL)
-    
-    # Enhanced context mapping - collect more comprehensive context
-    context_map = {}
-    section_context = ""  # Track current section/heading
-    
-    for i, raw_line in enumerate(lines):
-        line = _to_str(raw_line)
-        line_lower = line.lower()
-        line_stripped = line.strip()
-        
-        # Track section headings for context
-        if "heading" in line_lower:
-            heading_match = quoted_pattern.search(line)
-            if heading_match:
-                section_context = heading_match.group(1)
-                result["headings"].append(section_context)
-        
-        refs = ref_pattern.findall(line)
-        
-        if refs:
-            for ref in refs:
-                # Collect more comprehensive context
-                context_lines = []
-                
-                # Add current section context
-                if section_context:
-                    context_lines.append(f"Section: {section_context}")
-                
-                # Look backwards for context (up to 5 lines)
-                for j in range(max(0, i-5), i):
-                    prev_line = _to_str(lines[j]).strip()
-                    if prev_line and not ref_pattern.search(prev_line):
-                        # Extract meaningful text
-                        text_content = re.sub(r'^\s*-\s*', '', prev_line)
-                        text_content = re.sub(r':\s*$', '', text_content)
-                        text_content = re.sub(r'^\s*generic.*?:\s*', '', text_content)
-                        
-                        # Skip very generic content
-                        skip_terms = ['generic', 'text:', 'img', 'button:', 'textbox:', 'link:']
-                        if (len(text_content) > 2 and 
-                            not any(term in text_content.lower() for term in skip_terms) and
-                            not text_content.startswith('- ') and
-                            text_content not in context_lines):
-                            context_lines.append(text_content)
-                
-                # Look forwards for context (up to 3 lines)
-                for j in range(i+1, min(len(lines), i+4)):
-                    next_line = _to_str(lines[j]).strip()
-                    if next_line and not ref_pattern.search(next_line):
-                        text_content = re.sub(r'^\s*-\s*', '', next_line)
-                        text_content = re.sub(r':\s*$', '', text_content)
-                        text_content = re.sub(r'^\s*generic.*?:\s*', '', text_content)
-                        
-                        skip_terms = ['generic', 'text:', 'img', 'button:', 'textbox:', 'link:']
-                        if (len(text_content) > 2 and 
-                            not any(term in text_content.lower() for term in skip_terms) and
-                            not text_content.startswith('- ') and
-                            text_content not in context_lines):
-                            context_lines.append(text_content)
-                
-                context_map[ref] = context_lines
-    
-    # Enhanced element extraction
-    file_keywords = ["upload", "file", "resume", "cv", "document", "pdf", "browse files", "drag and drop"]
-    date_keywords = ["date", "calendar", "choose date"]
-    
-    for i, raw_line in enumerate(lines):
-        line = _to_str(raw_line)
-        line_lower = line.lower()
-        line_stripped = line.strip()
-        
-        # Extract title
-        if result["title"] is None and "page title:" in line_lower:
-            result["title"] = line.split(":", 1)[-1].strip()
+def _extract_bracket_tokens(s):
+    return re.findall(r'\[([^\]]+)\]', s)
+
+def _parse_attrs(tokens):
+    attrs = {}
+    for t in tokens:
+        if '=' in t:
+            k, v = t.split('=', 1)
+            attrs[k.strip()] = v.strip()
+        else:
+            attrs[t.strip()] = True
+    return attrs
+
+def _strip_brackets(s):
+    return re.sub(r'\s*\[[^\]]*\]', '', s).strip()
+
+def parse_line_to_node(raw_content):
+    # Trim outer single quotes that sometimes wrap a whole line in your snapshots
+    content_raw = raw_content
+    if content_raw.startswith("'") and content_raw.endswith("'"):
+        content_raw = content_raw[1:-1].strip()
+    tokens = _extract_bracket_tokens(content_raw)
+    attrs = _parse_attrs(tokens)
+    node = {"raw": raw_content, "attrs": attrs, "children": []}
+    node['ref'] = attrs.get('ref')
+
+    # remove bracket parts to simplify content parsing
+    content = _strip_brackets(content_raw)
+
+    # match: type optionally followed by "quoted label" or 'quoted label' or : after-label
+    m = re.match(r'^(?P<type>\w+)(?:\s+(?:["\'](?P<quoted>[^"\']+)["\']))?(?:\s*:\s*(?P<after>.*))?$', content)
+    if m:
+        t = m.group('type')
+        node['type'] = t
+        quoted = m.group('quoted')
+        after = m.group('after')
+        if quoted:
+            node['label'] = quoted
+        elif after is not None and after != "":
+            # remove surrounding quotes if present
+            label = after.strip()
+            if (label.startswith('"') and label.endswith('"')) or (label.startswith("'") and label.endswith("'")):
+                label = label[1:-1]
+            node['label'] = label
+        else:
+            node['label'] = None
+    else:
+        parts = content.split(None,1)
+        node['type'] = parts[0] if parts else 'generic'
+        node['label'] = parts[1] if len(parts)>1 else None
+
+    node['has_children'] = raw_content.strip().endswith(':')
+    return node
+
+def build_tree(lines):
+    root = {"type":"root","children":[],"indent":-1, "parent": None}
+    stack = [root]
+    for line in lines:
+        if not line.strip():
             continue
-        
-        # Enhanced file upload detection - USE REFS INSTEAD OF LABELS
-        if any(kw in line_lower for kw in file_keywords):
-            refs = ref_pattern.findall(line)
-            if refs:
-                # Create unique identifier using ref instead of label
-                for ref in refs:
-                    file_id = f"file_upload_{ref}"
-                    if file_id not in result["file_uploads"]:
-                        result["file_uploads"].append(file_id)
-                        result["interactives"].append(f"file_upload: {file_id}")
-                        result["all_clickables"].append(file_id)
-                        result["refs"][file_id] = [ref]
+        lstrip = line.lstrip()
+        if not lstrip.startswith('-'):
+            continue
+        indent = len(line) - len(lstrip)
+        content = lstrip[1:].lstrip()
+        node = parse_line_to_node(content)
+        node['indent'] = indent
+        node['parent'] = None
+        while stack and stack[-1]['indent'] >= indent:
+            stack.pop()
+        parent = stack[-1]
+        parent.setdefault('children', []).append(node)
+        node['parent'] = parent
+        stack.append(node)
+    return root
 
-        # Enhanced checkbox detection - look for iframe checkbox patterns
-        if "checkbox" in line_lower:
-            # Extract checkbox label from quoted text or context
-            labels = quoted_pattern.findall(line)
-            refs = ref_pattern.findall(line)
-            
-            if refs:
-                checkbox_label = "Checkbox"
-                if labels:
-                    checkbox_label = labels[0]
-                else:
-                    # Look for context in surrounding lines
-                    context_lines = context_map.get(refs[0], [])
-                    for context in context_lines:
-                        if "agree" in context.lower() or "terms" in context.lower() or "conditions" in context.lower():
-                            checkbox_label = context.strip()
-                            break
-                    
-                    # Also check current line for patterns like "I agree to terms & conditions"
-                    if "agree" in line_lower or "terms" in line_lower:
-                        # Look for the text after checkbox
-                        parts = line.split('checkbox', 1)
-                        if len(parts) > 1:
-                            remaining = parts[1]
-                            # Extract meaningful text
-                            text_match = re.search(r'"([^\"]*)"', remaining)
-                            if text_match:
-                                checkbox_label = text_match.group(1)
-                
-                result["checkboxes"].append(checkbox_label)
-                result["interactives"].append(f"checkbox: {checkbox_label}")
-                result["all_clickables"].append(checkbox_label)
-                result["refs"][checkbox_label] = refs
+def extract_fields(tree):
+    result = OrderedDict()
 
-        # Handle special cases - comboboxes without quotes
-        if "combobox" in line_lower and not quoted_pattern.search(line):
-            refs = ref_pattern.findall(line)
-            if refs:
-                # Look for context in previous lines for combobox labels
-                context_lines = context_map.get(refs[0], [])
-                for context in context_lines:
-                    if len(context) > 5 and not any(skip in context.lower() for skip in ['generic', 'text:', 'section:']):
-                        result["comboboxes"].append(context.strip())
-                        result["interactives"].append(f"combobox: {context.strip()}")
-                        if context.strip() not in result["refs"]:
-                            result["refs"][context.strip()] = refs
+    def add_field(key, field):
+        if key not in result:
+            result[key] = []
+        result[key].append(field)
+
+    def node_has_input_child(node):
+        for ch in node.get('children', []):
+            if ch.get('type') in ('textbox','combobox','radio','checkbox','button','spinbutton','file','file_upload','radiogroup'):
+                return True
+            if ch.get('children'):
+                if node_has_input_child(ch):
+                    return True
+        return False
+
+    def find_nearby_label(node):
+        # Search ancestors for nearby label siblings.
+        anc = node.get('parent')
+        path = []
+        while anc:
+            path.append(anc)
+            anc = anc.get('parent')
+        # path: immediate parent first, then grandparent...
+        for ancestor in path:
+            children = ancestor.get('children', [])
+            # find the top-level child in this ancestor that contains our node
+            top_child = node
+            while top_child.get('parent') and top_child.get('parent') is not ancestor:
+                top_child = top_child.get('parent')
+            # now find index
+            try:
+                idx = children.index(top_child)
+            except ValueError:
+                idx = None
+            # search left neighbors first for a label node
+            if idx is not None:
+                # look left
+                for i in range(idx-1, -1, -1):
+                    sib = children[i]
+                    if sib.get('label') and sib.get('type') in ('text','generic','paragraph','heading'):
+                        return sib.get('label')
+                    # if sib itself contains a text child label, prefer that
+                    # look inside sib for first text/generic with label
+                    label_in = find_label_in_subtree(sib)
+                    if label_in:
+                        return label_in
+                # then look right
+                for i in range(idx+1, len(children)):
+                    sib = children[i]
+                    if sib.get('label') and sib.get('type') in ('text','generic','paragraph','heading'):
+                        return sib.get('label')
+                    label_in = find_label_in_subtree(sib)
+                    if label_in:
+                        return label_in
+        return None
+
+    def find_label_in_subtree(node):
+        # DFS to find first text/generic/paragraph/heading with a label
+        if node.get('label') and node.get('type') in ('text','generic','paragraph','heading'):
+            return node.get('label')
+        for ch in node.get('children', []):
+            lbl = find_label_in_subtree(ch)
+            if lbl:
+                return lbl
+        return None
+
+    def process_node(node, group_label=None):
+        t = node.get('type')
+        label = node.get('label')
+        attrs = node.get('attrs', {})
+        children = node.get('children', [])
+
+        # If node is a generic/text and has visible label and subtree contains inputs -> grouping label
+        if t in ('generic','text','paragraph') and label and node_has_input_child(node):
+            group_label = label
+
+        if t == 'textbox':
+            placeholder = None
+            for ch in children:
+                if ch.get('type') in ('generic','text') and ch.get('label'):
+                    txt = ch['label'].strip()
+                    if '@' in txt or len(txt.split()) <= 4:
+                        placeholder = txt
                         break
-        
-        # Enhanced interactive element detection - handle all element types from snapshot
-        interactive_types = {
-            "button": ["button"],
-            "textbox": ["textbox", "input"],
-            "combobox": ["combobox", "select"],
-            "textarea": ["textarea"],
-            "checkbox": ["checkbox"],
-            "radio": ["radio"],
-            "radiogroup": ["radiogroup"],
-            "link": ["link"],
-            "tab": ["tab"],
-            "spinbutton": ["spinbutton"],
-            "group": ["group"],
-            "option": ["option"],  # Handle dropdown options
-            "list": ["list"],      # Handle file upload lists
-            "img": ["img"]         # Handle clickable images/icons
-        }
-        
-        detected_type = None
-        for element_type, keywords in interactive_types.items():
-            if any(f' {kw} ' in f' {line_lower} ' for kw in keywords):
-                detected_type = element_type
-                break
-        
-        if detected_type:
-            # Extract labels from quotes
-            labels = quoted_pattern.findall(line)
-            refs = ref_pattern.findall(line)
-            
-            # If combobox and options exist after this line, capture options
-            if detected_type == "combobox" and refs:
-                # scan next lines for options
-                opts = []
-                for j in range(i+1, min(len(lines), i+12)):
-                    next_line = _to_str(lines[j]).strip()
-                    if 'option' in next_line.lower() and quoted_pattern.search(next_line):
-                        q = quoted_pattern.search(next_line).group(1).strip()
-                        q = re.sub(r'\s*\[.*\]$', '', q).strip()
-                        if q and q not in opts:
-                            opts.append(q)
-                    else:
-                        # stop if no more option lines
-                        if next_line and not next_line.lower().startswith('- option'):
-                            break
-                if opts:
-                    # Store each combobox separately with its ref and options
-                    for ref in refs:
-                        combobox_id = f"combobox_{ref}"
-                        if combobox_id not in result["comboboxes"]:
-                            result["comboboxes"].append(combobox_id)
-                            result["interactives"].append(f"dropdown: {combobox_id}")
-                            result["refs"][combobox_id] = [ref]
-                            result["refs"][f"{combobox_id}_options"] = opts
-            
-            # Enhanced label extraction for elements without quoted labels
-            if not labels and refs:
-                ref = refs[0]
-                context_lines = context_map.get(ref, [])
-                
-                potential_labels = []
-                if "Browse Files" in line:
-                    potential_labels.append("Browse Files")
-                elif "Add Row" in line:
-                    potential_labels.append("Add Row")
-                elif "Choose Date" in line:
-                    potential_labels.append("Choose Date")
-                elif "Submit" in line:
-                    potential_labels.append("Submit")
-                elif "Clear" in line:
-                    potential_labels.append("Clear")
-                
-                for context in context_lines:
-                    clean_context = re.sub(r'^(Section:|text:\s*)', '', context).strip()
-                    clean_context = re.sub(r'[*\"]+', '', clean_context).strip()
-                    
-                    if (len(clean_context) > 1 and 
-                        clean_context.lower() not in ['generic', 'text', 'img', 'please select'] and
-                        not clean_context.startswith('- ')):
-                        potential_labels.append(clean_context)
-                
-                if not potential_labels:
-                    text_parts = line.split()
-                    for part in text_parts:
-                        if (len(part) > 2 and 
-                            part not in ['generic', 'ref', 'cursor'] and
-                            not part.startswith('[') and 
-                            not part.endswith(']')):
-                            potential_labels.append(part)
-                
-                if potential_labels:
-                    best_label = potential_labels[0]
-                    for label in potential_labels:
-                        label_lower = label.lower()
-                        if any(term in label_lower for term in ['upload', 'file', 'browse', 'submit', 'date', 'name', 'email', 'address']):
-                            best_label = label
-                            break
-                    labels = [best_label]
-            
-            # Process each label
-            for label in labels:
-                if label:
-                    label = label.strip().replace('"', '')
-                    if not label or label.lower() in ['generic', 'text']:
-                        continue
-                    
-                    element_info = {
-                        "label": label,
-                        "type": detected_type,
-                        "ref": refs[0] if refs else None,
-                        "line": line_stripped
-                    }
-                    
-                    if detected_type in ["button"] and label not in result["buttons"]:
-                        result["buttons"].append(label)
-                    elif detected_type in ["textbox", "input", "textarea", "spinbutton"] and label not in result["inputs"]:
-                        result["inputs"].append(label)
-                    elif detected_type in ["combobox", "select"] and label not in result["comboboxes"]:
-                        result["comboboxes"].append(label)
-                    elif detected_type == "link" and label not in result["links"]:
-                        result["links"].append(label)
-                    elif detected_type == "tab" and label not in result["tabs"]:
-                        result["tabs"].append(label)
-                    elif detected_type in ["radiogroup", "radio", "group"] and label not in result["radio_groups"]:
-                        result["radio_groups"].append(label)
-                    elif detected_type == "checkbox" and label not in result["checkboxes"]:
-                        result["checkboxes"].append(label)
-                        checkbox_info = f"checkbox: {label}"
-                        if checkbox_info not in result["interactives"]:
-                            result["interactives"].append(checkbox_info)
-                    elif detected_type == "list" and "uploaded files" in label.lower():
-                        list_info = f"file_list: {label}"
-                        if list_info not in result["file_uploads"]:
-                            result["file_uploads"].append(list_info)
-                    
-                    # Special handling for file uploads
-                    if any(kw in line_lower for kw in file_keywords):
-                        file_info = f"file_upload: {label}"
-                        if file_info not in result["file_uploads"]:
-                            result["file_uploads"].append(file_info)
-                    
-                    # Special handling for date fields
-                    if any(kw in line_lower for kw in date_keywords):
-                        date_info = f"date_field: {label}"
-                        if date_info not in result["date_fields"]:
-                            result["date_fields"].append(date_info)
-                    
-                    interactive_desc = f"{detected_type}: {label}"
-                    if interactive_desc not in result["interactives"]:
-                        result["interactives"].append(interactive_desc)
-                    
-                    if detected_type in ["button", "tab", "link"] and label not in result["all_clickables"]:
-                        result["all_clickables"].append(label)
-                    
-                    if refs:
-                        for ref in refs:
-                            if label not in result["refs"]:
-                                result["refs"][label] = []
-                            if ref not in result["refs"][label]:
-                                result["refs"][label].append(ref)
-    
-    # Additional processing for iframe content and nested elements
-    iframe_count = 0
-    for raw_line in lines:
-        line = _to_str(raw_line)
-        if "iframe" in line.lower():
-            iframe_count += 1
-            result["form_sections"].append(f"iframe_section_{iframe_count}")
-    
-    # Extract dropdown/combobox options and radiogroup questions (already enriched above)
-    for i, raw_line in enumerate(lines):
-        line = _to_str(raw_line)
-        line_lower = line.lower()
-        
-        if "radiogroup" in line_lower:
-            labels = quoted_pattern.findall(line)
-            refs = ref_pattern.findall(line)
-            if labels and refs:
-                skill_name = labels[0]
-                if skill_name not in result["radio_groups"]:
-                    result["radio_groups"].append(skill_name)
-                    result["interactives"].append(f"skill_rating: {skill_name}")
-                    result["refs"][skill_name] = refs
-        
-        elif "group" in line_lower:
-            labels = quoted_pattern.findall(line)
-            refs = ref_pattern.findall(line)
-            if labels and refs:
-                question = labels[0]
-                if question not in result["radio_groups"]:
-                    result["radio_groups"].append(question)
-                    result["interactives"].append(f"yes_no_question: {question}")
-                    result["refs"][question] = refs
-        
-        elif "combobox" in line_lower and quoted_pattern.search(line):
-            labels = quoted_pattern.findall(line)
-            refs = ref_pattern.findall(line)
-            if labels and refs:
-                question = labels[0]
-                if question not in result["comboboxes"]:
-                    result["comboboxes"].append(question)
-                    result["interactives"].append(f"dropdown: {question}")
-                    result["refs"][question] = refs
-                    # lookahead for options appended earlier in loop; already added to refs as <question>_options if found
-    
-        elif "radio" in line_lower and not "radiogroup" in line_lower:
-            labels = quoted_pattern.findall(line)
-            refs = ref_pattern.findall(line)
-            if labels and refs:
-                option = labels[0]
-                context_lines = context_map.get(refs[0], [])
-                parent_question = None
-                for context in context_lines:
-                    if "?" in context and len(context) > 10:
-                        parent_question = context.strip('?"')
-                        break
-                
-                option_info = f"radio_option: {option}"
-                if parent_question:
-                    option_info += f" (for: {parent_question})"
-                
-                if option_info not in result["interactives"]:
-                    result["interactives"].append(option_info)
-                    result["refs"][f"{option} (radio)"] = refs
-        
-        elif "checkbox" in line_lower:
-            labels = quoted_pattern.findall(line)
-            refs = ref_pattern.findall(line)
-            if labels and refs:
-                checkbox_label = labels[0]
-                checkbox_info = f"checkbox: {checkbox_label}"
-                if checkbox_info not in result["interactives"]:
-                    result["interactives"].append(checkbox_info)
-                    result["refs"][checkbox_label] = refs
-                    result["all_clickables"].append(checkbox_label)
-    
-    # Extract questions/labels that appear before form elements
-    question_candidates = []
-    for i, raw_line in enumerate(lines):
-        line_stripped = _to_str(raw_line).strip()
-        if (line_stripped.endswith('?') and len(line_stripped) > 10 and not any(kw in line_stripped.lower() for kw in INTERACTIVE_KEYWORDS)):
-            has_following_interactive = False
-            for j in range(i+1, min(len(lines), i+5)):
-                if _is_interactive_line(_to_str(lines[j]).lower()):
-                    has_following_interactive = True
-                    break
-            
-            if has_following_interactive:
-                clean_question = re.sub(r'^- ', '', line_stripped)
-                clean_question = re.sub(r'generic.*?:', '', clean_question).strip()
-                if clean_question and clean_question not in question_candidates:
-                    question_candidates.append(clean_question)
-    
-    for question in question_candidates:
-        if not any(question in existing for existing in result["comboboxes"] + result["radio_groups"] + result["inputs"]):
-            result["interactives"].append(f"question: {question}")
-    
+            field_label = label or group_label or find_nearby_label(node) or 'textbox'
+            field = {"ref": node.get('ref'), "type": "textbox", "placeholder": placeholder}
+            add_field(field_label, field)
+
+        elif t == 'combobox':
+            options = []
+            selected_val = None
+            for ch in children:
+                if ch.get('type') == 'option':
+                    opt = ch.get('label') or ''
+                    options.append(opt)
+                    if ch.get('attrs',{}).get('selected', False):
+                        selected_val = opt
+            field_label = label or group_label or find_nearby_label(node) or 'combobox'
+            field = {"ref": node.get('ref'), "type": "combobox", "options": options}
+            if selected_val is not None:
+                field['selected'] = selected_val
+            add_field(field_label, field)
+
+        elif t == 'radio':
+            field_label = group_label or label or find_nearby_label(node) or 'radio'
+            checked = bool(attrs.get('checked', False))
+            field = {"ref": node.get('ref'), "type": "radio", "label": label, "checked": checked}
+            add_field(field_label, field)
+
+        elif t == 'checkbox':
+            field_label = label or group_label or find_nearby_label(node) or 'checkbox'
+            checked = bool(attrs.get('checked', False))
+            field = {"ref": node.get('ref'), "type": "checkbox", "checked": checked}
+            add_field(field_label, field)
+
+        elif t == 'spinbutton':
+            field_label = label or group_label or find_nearby_label(node) or 'spinbutton'
+            field = {"ref": node.get('ref'), "type": "spinbutton", "label": label}
+            add_field(field_label, field)
+
+        elif t == 'button':
+            field_label = label or group_label or find_nearby_label(node) or 'button'
+            field = {"ref": node.get('ref'), "type": "button", "label": label}
+            add_field(field_label, field)
+
+        elif t in ('iframe','main','root','region','tabpanel'):
+            for ch in children:
+                process_node(ch, group_label=group_label)
+
+        elif t in ('heading','img','link','paragraph','text','generic','separator','tab','tablist','list'):
+            if t in ('paragraph','heading','text') and label and node_has_input_child(node):
+                group_label = label
+            for ch in children:
+                process_node(ch, group_label=group_label if group_label else label)
+
+        elif t in ('radiogroup',):
+            for ch in children:
+                process_node(ch, group_label=label or group_label)
+
+        else:
+            for ch in children:
+                process_node(ch, group_label=group_label if group_label else label)
+
+    for child in tree.get('children', []):
+        process_node(child, group_label=None)
     return result
+
+
+# BUCKETING 
+def extract_interactive_elements(snapshot_text):
+    lines = _normalize_snapshot_lines(snapshot_text)
+
+    start = 0
+    for i, l in enumerate(lines):
+        if l.strip() == 'yaml':
+            start = i + 1
+            break
+    else:
+        for i, l in enumerate(lines):
+            if l.lstrip().startswith('- '):
+                start = i
+                break
+
+    snapshot_lines = lines[start:]
+    tree = build_tree(snapshot_lines)
+    fields = extract_fields(tree)
+
+    # 🔹 Debug
+    #print("Extracted fields:", json.dumps(fields, indent=2))
+
+    refs = {}
+    inputs, checkboxes, radio_groups, comboboxes, file_uploads, dropdowns, buttons = (
+        [], [], [], [], [], [], []
+    )
+
+    for label, items in fields.items():
+        for item in items:
+            ref = item.get("ref")
+            ftype = item.get("type", "").lower()
+
+            if not ref:
+                continue
+
+            refs.setdefault(label, []).append(ref)
+
+            if ftype in ("textbox", "input"):
+                inputs.append(label)
+            elif ftype in ("checkbox",):
+                checkboxes.append(label)
+            elif ftype in ("radio", "radiogroup"):
+                radio_groups.append(label)
+            elif ftype in ("combobox", "select", "dropdown"):
+                comboboxes.append(f"combobox_{ref}")
+                if "options" in item:
+                    refs[f"combobox_{ref}_options"] = item["options"]
+            elif ftype in ("file", "file_upload"):
+                file_uploads.append(f"file_upload_{ref}")
+            elif ftype in ("button",):
+                buttons.append(label)
+
+    return {
+        "raw_fields": fields,
+        "refs": refs,
+        "inputs": inputs,
+        "checkboxes": checkboxes,
+        "radio_groups": radio_groups,
+        "comboboxes": comboboxes,
+        "file_uploads": file_uploads,
+        "buttons": buttons,
+    }
+
+
+
+
+# def parse_snapshot(text):
+#     lines = text.splitlines()
+#     start = 0
+#     for i,l in enumerate(lines):
+#         if l.strip() == 'yaml':
+#             start = i+1
+#             break
+#     else:
+#         for i,l in enumerate(lines):
+#             if l.lstrip().startswith('- '):
+#                 start = i
+#                 break
+#     snapshot_lines = lines[start:]
+#     tree = build_tree(snapshot_lines)
+#     return extract_fields(tree)
+
+
+# import re
+# from typing import Any, Dict, List, Optional
+
+# _REF_RE = re.compile(r"\[ref=((?:f\d+)?e\d+)\]")
+# _LABEL_RE = re.compile(r'"([^"]+)"|\'([^\']+)\'', re.UNICODE)
+
+# # Keep these in sync with your other utilities
+# _INPUT_TOKENS = (
+#     "textbox", "combobox", "textarea", "select", "checkbox",
+#     "radio", "radiogroup", "spinbutton", "file_upload", "file", "input"
+# )
+
+# def _dedup(seq: List[str]) -> List[str]:
+#     seen: set = set()
+#     out: List[str] = []
+#     for x in seq:
+#         if x not in seen:
+#             seen.add(x)
+#             out.append(x)
+#     return out
+
+# def extract_interactive_elements(snapshot_text: Any) -> Dict[str, Any]:
+#     """
+#     Return a structure that agent_core.py expects:
+
+#     {
+#       "title": str|None,
+#       "buttons": [str],
+#       "tabs": [str],
+#       "inputs": [str],
+#       "links": [str],
+#       "refs": { label: [ref, ...] }
+#     }
+#     """
+#     lines: List[str] = _normalize_snapshot_lines(snapshot_text)
+
+#     title: Optional[str] = None
+#     buttons: List[str] = []
+#     tabs: List[str] = []
+#     inputs: List[str] = []
+#     links: List[str] = []
+#     refs: Dict[str, List[str]] = {}
+
+#     # Try to find a page title quickly
+#     for ln in lines[:80]:  # only early lines
+#         low = ln.lower()
+#         # common patterns seen in snapshots
+#         m = re.search(r'^\s*title\s*[:=]\s*(.+)$', ln, flags=re.I)
+#         if m:
+#             title = m.group(1).strip().strip('"\'')
+#             break
+#         if "heading" in low or "page title" in low:
+#             ml = _LABEL_RE.search(ln)
+#             if ml:
+#                 title = (ml.group(1) or ml.group(2) or "").strip()
+#                 if title:
+#                     break
+
+#     def _label_from_line(line: str) -> Optional[str]:
+#         m = _LABEL_RE.search(line)
+#         if not m:
+#             return None
+#         return (m.group(1) or m.group(2) or "").strip()
+
+#     for line in lines:
+#         low = line.lower()
+#         ref_m = _REF_RE.search(line)
+#         ref = ref_m.group(1) if ref_m else None
+#         label = _label_from_line(line)
+
+#         kind: Optional[str] = None
+#         if "button" in low:
+#             kind = "buttons"
+#         elif "tab" in low and "table" not in low:  # avoid table rows
+#             kind = "tabs"
+#         elif "link" in low or "anchor" in low:
+#             kind = "links"
+#         elif any(tok in low for tok in _INPUT_TOKENS):
+#             kind = "inputs"
+
+#         if kind:
+#             text = label or (ref or line.strip())
+#             if kind == "buttons":
+#                 buttons.append(text)
+#             elif kind == "tabs":
+#                 tabs.append(text)
+#             elif kind == "links":
+#                 links.append(text)
+#             else:
+#                 inputs.append(text)
+
+#             if ref and text:
+#                 refs.setdefault(text, []).append(ref)
+
+#     return {
+#         "title": title,
+#         "buttons": _dedup(buttons),
+#         "tabs": _dedup(tabs),
+#         "inputs": _dedup(inputs),
+#         "links": _dedup(links),
+#         "refs": refs
+#     }
+
+
+
 
 def find_element_ref(snapshot_text: Any, element_text: str, element_type: str = None) -> Optional[str]:
     """
@@ -883,128 +880,131 @@ def find_element_ref(snapshot_text: Any, element_text: str, element_type: str = 
     return candidates[0][1]
 
 
-def extract_form_fields(snapshot_text: Any) -> List[Dict[str, str]]:
-    """
-    Enhanced form field extraction with better detection and iframe support.
-    """
-    lines = _normalize_snapshot_lines(snapshot_text)
+# def extract_form_fields(snapshot_text: Any) -> List[Dict[str, str]]:
+#     """
+#     Enhanced form field extraction with better detection and iframe support.
+#     """
+#     lines = _normalize_snapshot_lines(snapshot_text)
     
-    def _scan(lines: List[str], gated: bool) -> List[Dict[str, str]]:
-        fields_local: List[Dict[str, str]] = []
-        in_form = False
-        section_context = ""
+#     def _scan(lines: List[str], gated: bool) -> List[Dict[str, str]]:
+#         fields_local: List[Dict[str, str]] = []
+#         in_form = False
+#         section_context = ""
         
-        for i, raw_line in enumerate(lines):
-            line = _to_str(raw_line)
-            line_lower = line.lower()
+#         for i, raw_line in enumerate(lines):
+#             line = _to_str(raw_line)
+#             line_lower = line.lower()
             
-            # Track sections for better context
-            if "heading" in line_lower:
-                heading_match = re.search(r'"([^\"]+?)"', line)
-                if heading_match:
-                    section_context = heading_match.group(1)
+#             # Track sections for better context
+#             if "heading" in line_lower:
+#                 heading_match = re.search(r'"([^\"]+?)"', line)
+#                 if heading_match:
+#                     section_context = heading_match.group(1)
             
-            if gated and ("form" in line_lower or "personal information" in line_lower or "position information" in line_lower):
-                in_form = True
-            if gated and not in_form:
-                continue
+#             if gated and ("form" in line_lower or "personal information" in line_lower or "position information" in line_lower):
+#                 in_form = True
+#             if gated and not in_form:
+#                 continue
                 
-            if _is_interactive_line(line_lower):
-                # Enhanced label extraction
-                label_match = re.search(r'"([^\"]+?)"', line)
-                label = label_match.group(1) if label_match else "Unlabeled field"
+#             if _is_interactive_line(line_lower):
+#                 # Enhanced label extraction
+#                 label_match = re.search(r'"([^\"]+?)"', line)
+#                 label = label_match.group(1) if label_match else "Unlabeled field"
                 
-                # If no label found, try to get from context
-                if label == "Unlabeled field" and section_context:
-                    # Look at nearby lines for context
-                    for j in range(max(0, i-3), min(len(lines), i+3)):
-                        context_line = _to_str(lines[j]).strip()
-                        if (context_line and 
-                            not re.search(r'\[ref=', context_line) and
-                            not any(kw in context_line.lower() for kw in INTERACTIVE_KEYWORDS)):
-                            # Clean up context
-                            clean_context = re.sub(r'^- ', '', context_line)
-                            clean_context = re.sub(r':$', '', clean_context)
-                            if len(clean_context) > 1 and clean_context != "generic":
-                                label = clean_context
-                                break
+#                 # If no label found, try to get from context
+#                 if label == "Unlabeled field" and section_context:
+#                     # Look at nearby lines for context
+#                     for j in range(max(0, i-3), min(len(lines), i+3)):
+#                         context_line = _to_str(lines[j]).strip()
+#                         if (context_line and 
+#                             not re.search(r'\[ref=', context_line) and
+#                             not any(kw in context_line.lower() for kw in INTERACTIVE_KEYWORDS)):
+#                             # Clean up context
+#                             clean_context = re.sub(r'^- ', '', context_line)
+#                             clean_context = re.sub(r':$', '', clean_context)
+#                             if len(clean_context) > 1 and clean_context != "generic":
+#                                 label = clean_context
+#                                 break
                 
-                # Determine field type with enhanced detection
-                field_type = "text"
-                type_mappings = {
-                    "textbox": "text",
-                    "input": "text", 
-                    "textarea": "textarea",
-                    "combobox": "select",
-                    "select": "select",
-                    "checkbox": "checkbox",
-                    "radio": "radio",
-                    "radiogroup": "radio",
-                    "spinbutton": "number",
-                    "button": "button"
-                }
+#                 # Determine field type with enhanced detection
+#                 field_type = "text"
+#                 type_mappings = {
+#                     "textbox": "text",
+#                     "input": "text", 
+#                     "textarea": "textarea",
+#                     "combobox": "select",
+#                     "select": "select",
+#                     "checkbox": "checkbox",
+#                     "radio": "radio",
+#                     "radiogroup": "radio",
+#                     "spinbutton": "number",
+#                     "button": "button"
+#                 }
                 
-                for keyword, mapped_type in type_mappings.items():
-                    if keyword in line_lower:
-                        field_type = mapped_type
-                        break
+#                 for keyword, mapped_type in type_mappings.items():
+#                     if keyword in line_lower:
+#                         field_type = mapped_type
+#                         break
                 
-                # Special field type detection
-                if any(kw in label.lower() for kw in ["email", "@"]):
-                    field_type = "email"
-                elif any(kw in label.lower() for kw in ["phone", "tel"]):
-                    field_type = "tel"
-                elif any(kw in label.lower() for kw in ["date", "calendar"]):
-                    field_type = "date"
-                elif any(kw in label.lower() for kw in ["upload", "file", "cv", "resume"]):
-                    field_type = "file"
-                elif any(kw in label.lower() for kw in ["password", "pass"]):
-                    field_type = "password"
+#                 # Special field type detection
+#                 if any(kw in label.lower() for kw in ["email", "@"]):
+#                     field_type = "email"
+#                 elif any(kw in label.lower() for kw in ["phone", "tel"]):
+#                     field_type = "tel"
+#                 elif any(kw in label.lower() for kw in ["date", "calendar"]):
+#                     field_type = "date"
+#                 elif any(kw in label.lower() for kw in ["upload", "file", "cv", "resume"]):
+#                     field_type = "file"
+#                 elif any(kw in label.lower() for kw in ["password", "pass"]):
+#                     field_type = "password"
                 
-                required = "required" in line_lower or "*" in line
+#                 required = "required" in line_lower or "*" in line
                 
-                field_info = {
-                    "label": label,
-                    "type": field_type,
-                    "required": required,
-                    "section": section_context
-                }
+#                 field_info = {
+#                     "label": label,
+#                     "type": field_type,
+#                     "required": required,
+#                     "section": section_context
+#                 }
                 
-                # If combobox/select, attempt to capture options immediately after
-                if field_type in ("select", "dropdown" , "combobox"):
-                    opts = []
-                    for j in range(i+1, min(len(lines), i+12)):
-                        next_line = _to_str(lines[j]).strip()
-                        if 'option' in next_line.lower() and re.search(r'"([^\"]+?)"', next_line):
-                            opt = re.search(r'"([^\"]+?)"', next_line).group(1).strip()
-                            opt = re.sub(r'\s*\[.*\]$', '', opt).strip()
-                            if opt:
-                                opts.append(opt)
-                        else:
-                            # stop if line not an option
-                            if next_line and not next_line.lower().startswith('- option'):
-                                break
-                    if opts:
-                        field_info["options"] = opts
+#                 # If combobox/select, attempt to capture options immediately after
+#                 if field_type in ("select", "dropdown" , "combobox"):
+#                     opts = []
+#                     for j in range(i+1, min(len(lines), i+12)):
+#                         next_line = _to_str(lines[j]).strip()
+#                         if 'option' in next_line.lower() and re.search(r'"([^\"]+?)"', next_line):
+#                             opt = re.search(r'"([^\"]+?)"', next_line).group(1).strip()
+#                             opt = re.sub(r'\s*\[.*\]$', '', opt).strip()
+#                             if opt:
+#                                 opts.append(opt)
+#                         else:
+#                             # stop if line not an option
+#                             if next_line and not next_line.lower().startswith('- option'):
+#                                 break
+#                     if opts:
+#                         field_info["options"] = opts
                 
-                fields_local.append(field_info)
+#                 fields_local.append(field_info)
         
-        return fields_local
+#         return fields_local
 
-    fields = _scan(lines, gated=True)
-    if not fields:
-        fields = _scan(lines, gated=False)
+#     fields = _scan(lines, gated=True)
+#     if not fields:
+#         fields = _scan(lines, gated=False)
     
-    # Enhanced deduplication - keep most informative version
-    dedup = {}
-    for f in fields:
-        label = f["label"]
-        if label not in dedup or (f.get("section") and not dedup[label].get("section")):
-            dedup[label] = f
+#     # Enhanced deduplication - keep most informative version
+#     dedup = {}
+#     for f in fields:
+#         label = f["label"]
+#         if label not in dedup or (f.get("section") and not dedup[label].get("section")):
+#             dedup[label] = f
     
-    return list(dedup.values())
+#     return list(dedup.values())
 
 
+
+
+#used in main.py
 def analyze_goal(goal_text: str) -> Dict[str, Any]:
     """Enhanced goal analysis with more comprehensive detection."""
     goal_lower = _to_str(goal_text).lower()
@@ -1039,357 +1039,3 @@ def analyze_goal(goal_text: str) -> Dict[str, Any]:
         analysis["target_url"] = None
     
     return analysis
-
-# # =====================================================================
-# # REAL-WEB INTEGRATION TESTS FOR utils.py (Verbose + Live Snapshots)
-# # =====================================================================
-# # Added: Full result printing (parsed structure, form fields list, goal analysis),
-# # per-site JSON friendly aggregation and overall JSON dump.
-# # =====================================================================
-
-# import os
-# import time
-# import json
-# import asyncio
-# from dataclasses import dataclass, field
-# from mcp import ClientSession, StdioServerParameters
-# from mcp.client.stdio import stdio_client
-# from pprint import pformat
-
-# # ---- Verbose Logging / Color ------------------------------------------------
-# USE_COLOR = os.getenv("NO_COLOR") not in ("1", "true", "TRUE")
-# def _c(code: str) -> str: return code if USE_COLOR else ""
-# CLR_OK = _c("\033[32m")
-# CLR_FAIL = _c("\033[31m")
-# CLR_INFO = _c("\033[34m")
-# CLR_WARN = _c("\033[33m")
-# CLR_DIM = _c("\033[2m")
-# CLR_RESET = _c("\033[0m")
-# CLR_CYAN = _c("\033[36m")
-
-# def log(section: str, msg: str, level: str = "INFO"):
-#     ts = time.strftime("%H:%M:%S")
-#     col = {
-#         "INFO": CLR_INFO,
-#         "OK": CLR_OK,
-#         "WARN": CLR_WARN,
-#         "FAIL": CLR_FAIL,
-#         "DATA": CLR_DIM,
-#         "STEP": CLR_CYAN,
-#     }.get(level, CLR_INFO)
-#     print(f"{col}[{ts}] [{section}] {msg}{CLR_RESET}")
-
-# def truncate_local(text: str, limit: int = 800):
-#     return text if len(text) <= limit else text[:limit] + f"... <truncated {len(text)-limit} chars>"
-
-# # ---- Lightweight Tool Execution --------------------------------------------
-# class _TempToolCaller:
-#     def __init__(self, session: ClientSession):
-#         self.session = session
-#         self.schemas: Dict[str, Dict[str, Any]] = {}
-
-#     async def init(self):
-#         listing = await self.session.list_tools()
-#         for tool_info in getattr(listing, "tools", []) or []:
-#             name = getattr(tool_info, "name", None)
-#             if not name:
-#                 continue
-#             schema = (
-#                 getattr(tool_info, "input_schema", None)
-#                 or getattr(tool_info, "inputSchema", None)
-#                 or {}
-#             )
-#             props = schema.get("properties", {}) if isinstance(schema, dict) else {}
-#             req = set(schema.get("required", []) if isinstance(schema, dict) else [])
-#             self.schemas[name] = {"properties": props, "required": req}
-
-#     async def call(self, name: str, args: Dict[str, Any]):
-#         if (
-#             name in self.schemas
-#             and "element" in self.schemas[name]["properties"]
-#             and "element" not in args
-#             and "selector" in args
-#         ):
-#             args["element"] = args.pop("selector")
-#         result = await self.session.call_tool(name, args)
-#         content = getattr(result, "content", None)
-#         if isinstance(content, list):
-#             collected = []
-#             for c in content:
-#                 t = getattr(c, "text", None)
-#                 if t:
-#                     collected.append(t)
-#             return "\n".join(collected) if collected else str(result)
-#         return str(result)
-
-# # ---- Data Classes -----------------------------------------------------------
-# @dataclass
-# class AssertionResult:
-#     name: str
-#     passed: bool
-#     detail: str = ""
-
-# @dataclass
-# class SiteTestResult:
-#     site: str
-#     passed: bool
-#     assertions: List[AssertionResult] = field(default_factory=list)
-#     snapshot_excerpt: str = ""
-#     counts: Dict[str, int] = field(default_factory=dict)
-#     parsed_summary: Dict[str, Any] = field(default_factory=dict)
-#     form_fields: List[Dict[str, Any]] = field(default_factory=list)
-#     goal_analysis: Dict[str, Any] = field(default_factory=dict)
-
-# # ---- Helpers ----------------------------------------------------------------
-# def count_tokens(snapshot: str) -> Dict[str, int]:
-#     low = snapshot.lower()
-#     return {
-#         "buttons": low.count(" button "),
-#         "inputs": sum(low.count(k) for k in [" textbox ", " input ", " combobox ", " textarea "]),
-#         "links": low.count(" link "),
-#         "tabs": low.count(" tab "),
-#         "refs": snapshot.count("[ref="),
-#         "lines": snapshot.count("\n") + 1,
-#         "chars": len(snapshot),
-#     }
-
-# def assert_condition(cond: bool, name: str, detail: str) -> AssertionResult:
-#     if cond:
-#         log("ASSERT", f"PASS {name} - {detail}", "OK")
-#         return AssertionResult(name, True, detail)
-#     else:
-#         log("ASSERT", f"FAIL {name} - {detail}", "FAIL")
-#         return AssertionResult(name, False, detail)
-
-# async def snapshot_site(url: str) -> str:
-#     server_params = StdioServerParameters(
-#         command=r"C:\Program Files\nodejs\npx.cmd",
-#         args=["-y", "@playwright/mcp@latest"],
-#     )
-#     log("CONNECT", f"🔌 Opening session for {url}")
-#     async with stdio_client(server_params) as (read, write):
-#         async with ClientSession(read, write) as session:
-#             await session.initialize()
-#             caller = _TempToolCaller(session)
-#             await caller.init()
-
-#             if "browser_navigate" not in caller.schemas:
-#                 raise RuntimeError("browser_navigate tool not available")
-#             if "browser_snapshot" not in caller.schemas:
-#                 raise RuntimeError("browser_snapshot tool not available")
-
-#             log("ACTION", f"Navigating to {url}", "STEP")
-#             nav_start = time.perf_counter()
-#             _ = await caller.call("browser_navigate", {"url": url})
-#             log("ACTION", f"Navigation ok in {(time.perf_counter()-nav_start)*1000:.1f} ms", "OK")
-
-#             snap_start = time.perf_counter()
-#             snapshot = await caller.call("browser_snapshot", {})
-#             log("ACTION", f"Snapshot acquired in {(time.perf_counter()-snap_start)*1000:.1f} ms", "OK")
-#             return snapshot
-
-# # ---- Core Live Tests --------------------------------------------------------
-# def summarize_parsed(parsed: Dict[str, Any]) -> Dict[str, Any]:
-#     """Produce a condensed summary for logging / JSON export."""
-#     return {
-#         "title": parsed.get("title"),
-#         "headings_count": len(parsed.get("headings", [])),
-#         "buttons_count": len(parsed.get("buttons", [])),
-#         "inputs_count": len(parsed.get("inputs", [])),
-#         "links_count": len(parsed.get("links", [])),
-#         "tabs_count": len(parsed.get("tabs", [])),
-#         "refs_labels": len(parsed.get("refs", {})),
-#         "sample_headings": parsed.get("headings", [])[:5],
-#         "sample_buttons": parsed.get("buttons", [])[:5],
-#         "sample_inputs": parsed.get("inputs", [])[:5],
-#         "sample_links": parsed.get("links", [])[:5],
-#     }
-
-# def print_full_results(site_result: SiteTestResult):
-#     log("RESULT", f"=== Detailed Results for {site_result.site} ===", "STEP")
-#     print(f"{CLR_DIM}Snapshot excerpt (truncated):\n{site_result.snapshot_excerpt}{CLR_RESET}")
-#     print(f"{CLR_INFO}Token counts: {site_result.counts}{CLR_RESET}")
-#     print(f"{CLR_INFO}Parsed summary: {pformat(site_result.parsed_summary)}{CLR_RESET}")
-#     if site_result.form_fields:
-#         print(f"{CLR_INFO}Form fields ({len(site_result.form_fields)}):{CLR_RESET}")
-#         for f in site_result.form_fields[:10]:
-#             print(f"  - {f}")
-#         if len(site_result.form_fields) > 10:
-#             print(f"  ... ({len(site_result.form_fields)-10} more)")
-#     else:
-#         print(f"{CLR_INFO}Form fields: None detected{CLR_RESET}")
-#     print(f"{CLR_INFO}Goal analysis: {site_result.goal_analysis}{CLR_RESET}")
-#     print(f"{CLR_INFO}Assertions:{CLR_RESET}")
-#     for a in site_result.assertions:
-#         mark = f"{CLR_OK}PASS{CLR_RESET}" if a.passed else f"{CLR_FAIL}FAIL{CLR_RESET}"
-#         print(f"  [{mark}] {a.name} - {a.detail}")
-#     print()
-
-# async def test_site_with_utils(url: str) -> SiteTestResult:
-#     log("SITE", f"Testing utilities using live snapshot: {url}")
-#     try:
-#         raw_snapshot = await snapshot_site(url)
-#     except Exception as e:
-#         log("SITE", f"Snapshot failure: {e}", "FAIL")
-#         sr = SiteTestResult(site=url, passed=False, assertions=[AssertionResult("snapshot", False, str(e))])
-#         print_full_results(sr)
-#         return sr
-
-#     excerpt = truncate_local(raw_snapshot, 1200)
-#     counts = count_tokens(raw_snapshot)
-#     log("SNAPSHOT", f"Excerpt:\n{CLR_DIM}{excerpt}{CLR_RESET}", "DATA")
-#     log("COUNTS", f"{counts}", "INFO")
-
-#     assertions: List[AssertionResult] = []
-
-#     # 1. extract_interactive_elements
-#     parsed = extract_interactive_elements(raw_snapshot)
-#     assertions.append(assert_condition(isinstance(parsed, dict), "parsed_type_dict", "Result is dict"))
-#     assertions.append(assert_condition("buttons" in parsed, "buttons_key", "buttons key present"))
-#     assertions.append(assert_condition(len(parsed["interactives"]) >= 0, "interactives_list", "interactives collected"))
-#     if parsed["buttons"]:
-#         # ensure at least one button label exists in parsed["buttons"]
-#         assertions.append(assert_condition(len(parsed["buttons"]) > 0, "button_in_interactives_relation",
-#                                            "Buttons exist; interactive representation assumed"))
-#     else:
-#         assertions.append(AssertionResult("button_in_interactives_relation", True, "No buttons; skipped"))
-
-#     # 2. find_element_ref (attempt first label that has refs)
-#     found_ref_assert = AssertionResult("find_element_ref_any", True, "No labeled element with ref found (acceptable)")
-#     for label, ref_list in parsed.get("refs", {}).items():
-#         if ref_list:
-#             ref = find_element_ref(raw_snapshot, label)
-#             if ref and ref in ref_list:
-#                 found_ref_assert = assert_condition(True, "find_element_ref_any",
-#                                                     f"Resolved ref {ref} for label '{label}'")
-#             else:
-#                 found_ref_assert = assert_condition(False, "find_element_ref_any",
-#                                                     f"Could not confirm ref for '{label}' (parsed={ref_list}, resolved={ref})")
-#             break
-#     assertions.append(found_ref_assert)
-
-#     # 3. extract_form_fields
-#     fields = extract_form_fields(raw_snapshot)
-#     if fields:
-#         assertions.append(assert_condition(len(fields) > 0, "form_fields_detected", f"{len(fields)} fields"))
-#         first_field = fields[0]
-#         assertions.append(assert_condition(
-#             all(k in first_field for k in ("label", "type", "required")),
-#             "form_field_shape",
-#             f"First field keys: {list(first_field.keys())}"
-#         ))
-#     else:
-#         assertions.append(AssertionResult("form_fields_detected", True, "No form fields (page may not contain forms)"))
-
-#     # 4. analyze_goal
-#     dynamic_goal = f"Navigate to {url} and extract data then take a screenshot"
-#     analysis = analyze_goal(dynamic_goal)
-#     assertions.append(assert_condition(analysis["requires_navigation"], "goal_nav_detected", "navigation True"))
-#     assertions.append(assert_condition(analysis["requires_extraction"], "goal_extract_detected", "extraction True"))
-#     assertions.append(assert_condition(analysis["requires_screenshot"], "goal_screenshot_detected", "screenshot True"))
-#     assertions.append(assert_condition(analysis["target_url"] == url, "goal_url_match", f"url={analysis['target_url']}"))
-
-#     passed = all(a.passed for a in assertions)
-
-#     site_result = SiteTestResult(
-#         site=url,
-#         passed=passed,
-#         assertions=assertions,
-#         snapshot_excerpt=excerpt,
-#         counts=counts,
-#         parsed_summary=summarize_parsed(parsed),
-#         form_fields=fields,
-#         goal_analysis=analysis
-#     )
-
-#     # Print full detailed result block (NEW)
-#     print_full_results(site_result)
-#     return site_result
-
-# async def run_live_tests():
-#     log("RUN", "Starting live utils tests against real sites")
-#     sites = [
-#         "https://example.com",
-#         "https://httpbin.org/forms/post",
-#         "https://www.wikipedia.org"
-#     ]
-#     results: List[SiteTestResult] = []
-#     for s in sites:
-#         try:
-#             results.append(await test_site_with_utils(s))
-#         except Exception as e:
-#             log("SITE", f"Fatal test error for {s}: {e}", "FAIL")
-#             sr = SiteTestResult(
-#                 site=s,
-#                 passed=False,
-#                 assertions=[AssertionResult("fatal", False, str(e))]
-#             )
-#             print_full_results(sr)
-#             results.append(sr)
-
-#     # Summary
-#     print("\n" + "=" * 72)
-#     print("LIVE UTILS TEST SUMMARY")
-#     print("=" * 72)
-#     total_asserts = 0
-#     total_passed = 0
-#     summary_for_json = []
-#     for r in results:
-#         site_col = CLR_OK if r.passed else CLR_FAIL
-#         pass_count = sum(1 for a in r.assertions if a.passed)
-#         total = len(r.assertions)
-#         total_asserts += total
-#         total_passed += pass_count
-#         print(f"{site_col}{r.site}: {pass_count}/{total} assertions passed{CLR_RESET}")
-#         for a in r.assertions:
-#             a_col = CLR_OK if a.passed else CLR_FAIL
-#             print(f"  {a_col}{'[PASS]' if a.passed else '[FAIL]'} {a.name}{CLR_RESET} - {a.detail}")
-#         summary_for_json.append({
-#             "site": r.site,
-#             "passed": r.passed,
-#             "assertions": [{"name": a.name, "passed": a.passed, "detail": a.detail} for a in r.assertions],
-#             "counts": r.counts,
-#             "parsed_summary": r.parsed_summary,
-#             "form_fields": r.form_fields,
-#             "goal_analysis": r.goal_analysis
-#         })
-
-#     print(f"\nOVERALL: {total_passed}/{total_asserts} assertions passed")
-
-#     # Print consolidated machine-friendly JSON to stdout (NEW)
-#     print("\n=== RAW JSON RESULTS (stdout) ===")
-#     print(json.dumps(summary_for_json, indent=2))
-
-#     if os.getenv("UTILS_LIVE_JSON") in ("1", "true", "TRUE"):
-#         out_file = "utils_live_test_summary.json"
-#         with open(out_file, "w", encoding="utf-8") as f:
-#             json.dump(summary_for_json, f, indent=2)
-#         print(f"\nJSON summary written to {out_file}")
-#     return 0 if total_passed == total_asserts else 1
-
-# def _sync(coro):
-#     return asyncio.run(coro)
-
-# if __name__ == "__main__":
-#     import argparse
-#     parser = argparse.ArgumentParser(description="Utils module (live web snapshot tests)")
-#     parser.add_argument("--run-live-tests", action="store_true", help="Run live tests using real browser snapshots")
-#     parser.add_argument("--json", action="store_true", help="Emit JSON summary file (UTILS_LIVE_JSON=1)")
-#     args = parser.parse_args()
-
-#     if args.json:
-#         os.environ["UTILS_LIVE_JSON"] = "1"
-
-#     if args.run_live_tests:
-#         code = _sync(run_live_tests())
-#         raise SystemExit(code)
-
-#     print(
-#         "Usage:\n"
-#         "  python utils.py --run-live-tests\n"
-#         "Options:\n"
-#         "  --json   (emit utils_live_test_summary.json)\n"
-#         "Environment:\n"
-#         "  NO_COLOR=1 disables colors\n"
-#         "  UTILS_LIVE_JSON=1 writes JSON summary\n"
-#     )
