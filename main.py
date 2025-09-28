@@ -101,7 +101,7 @@ async def main():
    
     # Default goal if none provided
     goal = "".join(args.goal) if args.goal else (
-        "Navigate to https://careers-marzetti.icims.com/jobs/7332/qa-analyst-i/candidate?from=login&eem=_jtH0TjR1USwVQ6qenUs0o6StwCq1R_oQC3HR0jVRim4Y3dEQpUwveBuZxAUxn6i&code=cd8cd0a2fd31388819ecf18ef03d51140a270553133c996c4182003a4db7319b&ga=4bdc429a4721fe04e21846f05e14f7e6f5441839e3098c4c42223e72dc3b044e&accept_gdpr=1 , get all the job query form fields and fill them with dummy data and submit the form. "
+        "Navigate to https://form.jotform.com/252131352654450 , get all the job query form fields and fill them with dummy data and submit the form. "
     )
 
     config = {

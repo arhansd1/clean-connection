@@ -10,12 +10,13 @@ from langgraph.graph import StateGraph, END
 # from langgraph.prebuilt import ToolExecutor, ToolInvocation
 import nest_asyncio
 import os
-os.environ["GOOGLE_APT_KEY"] = "AIzaSyDJMNXFV6k6DbZlb-Z-mfEynssltlGnfFA"  # Replace with your actual API key
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Apply nest_asyncio for Jupyter compatibility
 nest_asyncio.apply()
-
-# Agent State Definition
 class WebAgentState(TypedDict):
     query: str
     messages: List[Any]
@@ -309,7 +310,7 @@ async def run_single_task(query: str, google_api_key: str = None):
 # Interactive function for custom queries
 async def interactive_web_automation():
     """Interactive web automation session"""
-    google_api_key = os.getenv("AIzaSyDJMNXFV6k6DbZlb-Z-mfEynssltlGnfFA")
+    google_api_key = os.getenv("GOOGLE_API_KEY")
     agent = await create_web_agent(google_api_key)
     
     print("🤖 Interactive Web Automation Agent")
@@ -349,7 +350,7 @@ async def quick_demo():
     print("=" * 50)
     
     # Set your Google API key here or in environment variable
-    google_api_key = "AIzaSyDJMNXFV6k6DbZlb-Z-mfEynssltlGnfFA"  # Replace with "your-google-api-key" or set GOOGLE_API_KEY env var
+    google_api_key = os.getenv("GOOGLE_API_KEY")
 
     # Create and test the agent
     agent = await create_web_agent(google_api_key)
